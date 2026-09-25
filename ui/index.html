@@ -245,10 +245,6 @@ body:before{
   </div>
 </div>
 
-<div id="presence">
-  <div class="line"><span id="beacon"></span><span id="connection">ONLINE</span></div>
-  <div id="state">STANDBY</div>
-</div>
 
 <div id="transcript" aria-hidden="true"></div>
 <div id="reply" aria-hidden="true"></div>
@@ -273,8 +269,6 @@ body:before{
 (function(){
   'use strict';
   const core = document.getElementById('coreScene');
-  const connection = document.getElementById('connection');
-  const state = document.getElementById('state');
   const approvalModal = document.getElementById('approvalModal');
   const approvalAction = document.getElementById('approvalAction');
   const approvalPrompt = document.getElementById('approvalPrompt');
@@ -289,7 +283,6 @@ body:before{
 
   const setState = (next, detail) => {
     core.dataset.state = next || 'idle';
-    state.textContent = String(detail || next || 'STANDBY').toUpperCase();
     document.documentElement.style.setProperty('--state-accent',
       next==='error'||next==='failed' ? 'var(--danger)' :
       next==='approved'||next==='completed' ? 'var(--green)' :
@@ -316,11 +309,9 @@ body:before{
   document.getElementById('denyBtn').onclick=()=>window.sendApprovalResponse(false);
 
   socket.on('connect',()=>{
-    connection.textContent='ONLINE';
     setState('idle','STANDBY');
   });
   socket.on('disconnect',()=>{
-    connection.textContent='RECONNECTING';
     setState('error','RECONNECTING');
   });
   socket.on('status',(data)=>{
