@@ -43,21 +43,7 @@ from engine.planner import Planner  # noqa: E402
 from engine.executor import Executor  # noqa: E402
 from engine.verifier import Verifier  # noqa: E402
 from engine.learner import Learner  # noqa: E402
-
-
-class FlaskGateway:
-    def __init__(self, socketio_obj):
-        self.socketio = socketio_obj
-
-    def request_approval(self, action_type, context, prompt_text):
-        """Ask the user for approval via the HUD."""
-        # For now, auto-approve low risk, otherwise ask (in future this can emit an event)
-        self.log(f"Gateway auto-approving {action_type}: {context}")
-        return True
-        
-    def log(self, message):
-        print(message)
-        self.socketio.emit("status", {"state": "executing", "message": str(message)})
+from backend.approval_service import BrowserApprovalGateway  # noqa: E402
 
 
 def env_bool(name: str, default: bool = False) -> bool:
@@ -98,7 +84,7 @@ memory_lock = threading.RLock()
 pending_forget: dict[str, dict[str, object]] = {}
 pending_forget_lock = threading.RLock()
 
-engine_gateway = FlaskGateway(socketio)
+engine_gateway = BrowserApprovalGateway(socketio)
 engine_learner = Learner()
 engine_orchestrator = Orchestrator(
     planner=Planner(provider_manager, task_router),
@@ -589,14 +575,14 @@ def on_user_speech(data):
         try:
             obj = engine_orchestrator.receive(user_text)
             result = engine_orchestrator.execute(obj)
-            
+
             if result.get("success"):
                 reply = f"Task completed successfully in {result.get('duration', '?')}. Steps completed: {result.get('steps_completed')}."
             else:
                 reply = f"Task failed: {result.get('error', 'unknown error')}."
         except Exception as e:
             reply = f"Error running autonomous engine: {e}"
-            
+
         emit("jarvis_reply", {
             "text": reply,
             "memory_saved": bool(remembered),
@@ -783,6 +769,21 @@ def on_forget_memory(data):
             "removed": removed,
             "message": f"Forgot {removed} matching fact(s).",
         },
+    )
+
+
+@socketio.on("disconnect")
+def on_disconnect():
+    engine_gateway.deny_pending()
+
+
+@socketio.on("approval_response")
+def on_approval_response(data):
+    if not isinstance(data, dict):
+        return
+    engine_gateway.respond(
+        data.get("id", ""),
+        data.get("result", False),
     )
 
 
