@@ -582,8 +582,134 @@ body[data-ui-state="idle"] .presence-copy { opacity: .58; }
 .core-scene[data-state="executing"] .core-ring { border-color: rgba(255, 197, 119, .66); }
 .core-scene[data-state="error"] { --state-speed: .25; filter: drop-shadow(0 0 28px rgba(255, 108, 108, .4)); }
 .core-scene[data-state="error"] .core-center { filter: saturate(1.18) brightness(.96); box-shadow: 0 0 14px var(--amber-bright), 0 0 38px rgba(255, 184, 92, .86), 0 0 78px rgba(255, 94, 94, .35), inset 0 0 20px rgba(255, 255, 226, .9); }
-body[data-ui-state="error"] .state-line { color: var(--danger); text-shadow: 0 0 13px rgba(255, 116, 116, .65); }
-body[data-ui-state="error"] .state-beacon { background: var(--danger); box-shadow: 0 0 9px var(--danger); }
+body[data-ui-state="error"] .state-line, body[data-ui-state="failed"] .state-line { color: var(--danger); text-shadow: 0 0 13px rgba(255, 116, 116, .65); }
+body[data-ui-state="error"] .state-beacon, body[data-ui-state="failed"] .state-beacon { background: var(--danger); box-shadow: 0 0 9px var(--danger); }
+
+/* New state choreography */
+.core-scene[data-state="waiting_confirmation"] { --state-speed: .5; filter: drop-shadow(0 0 38px rgba(255, 230, 100, .4)); }
+.core-scene[data-state="waiting_confirmation"] .core-ring { border-color: rgba(255, 230, 100, .76); }
+.core-scene[data-state="waiting_confirmation"] .core-center { filter: saturate(1.3) hue-rotate(-15deg); }
+
+.core-scene[data-state="approved"] { --state-speed: 1.0; filter: drop-shadow(0 0 38px rgba(100, 255, 200, .4)); }
+.core-scene[data-state="approved"] .core-ring { border-color: rgba(100, 255, 200, .76); }
+.core-scene[data-state="approved"] .core-center { filter: saturate(1.3) hue-rotate(60deg); }
+
+.core-scene[data-state="completed"] { --state-speed: 1.0; filter: drop-shadow(0 0 38px rgba(100, 255, 150, .4)); }
+.core-scene[data-state="completed"] .core-ring { border-color: rgba(100, 255, 150, .76); }
+.core-scene[data-state="completed"] .core-center { filter: saturate(1.3) hue-rotate(90deg); }
+
+.core-scene[data-state="cancelled"] { --state-speed: .5; filter: drop-shadow(0 0 20px rgba(150, 150, 150, .4)); }
+.core-scene[data-state="cancelled"] .core-center { filter: grayscale(0.8) brightness(0.8); }
+
+.core-scene[data-state="verifying"] { --state-speed: 2.8; filter: drop-shadow(0 0 30px rgba(200, 100, 255, .4)); }
+.core-scene[data-state="verifying"] .core-ring { border-color: rgba(200, 100, 255, .76); }
+.core-scene[data-state="verifying"] .core-center { filter: hue-rotate(60deg) brightness(1.2); }
+
+.core-scene[data-state="retrieving"] { --state-speed: 1.8; filter: drop-shadow(0 0 30px rgba(100, 200, 255, .4)); }
+.core-scene[data-state="retrieving"] .core-ring { border-style: dashed; }
+.core-scene[data-state="searching"] { --state-speed: 1.8; filter: drop-shadow(0 0 30px rgba(100, 200, 255, .4)); }
+.core-scene[data-state="searching"] .core-ring { border-style: dashed; }
+
+.core-scene[data-state="failed"] { --state-speed: .25; filter: drop-shadow(0 0 28px rgba(255, 108, 108, .4)); }
+.core-scene[data-state="failed"] .core-center { filter: saturate(1.18) brightness(.96); box-shadow: 0 0 14px var(--amber-bright), 0 0 38px rgba(255, 184, 92, .86), 0 0 78px rgba(255, 94, 94, .35), inset 0 0 20px rgba(255, 255, 226, .9); }
+
+.approval-modal {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 100;
+  width: 90vw;
+  max-width: 480px;
+  background: rgba(4, 16, 28, 0.85);
+  border: 1px solid rgba(113, 230, 255, 0.3);
+  box-shadow: 0 0 40px rgba(0, 0, 0, 0.8), inset 0 0 20px rgba(113, 230, 255, 0.1);
+  border-radius: 4px;
+  padding: 24px;
+  text-align: center;
+  backdrop-filter: blur(12px);
+  color: var(--cyan-bright);
+}
+.approval-title {
+  color: var(--amber);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.3em;
+  margin-bottom: 16px;
+  text-shadow: 0 0 8px rgba(255, 194, 112, 0.5);
+}
+.approval-action {
+  font-size: 16px;
+  margin-bottom: 20px;
+  letter-spacing: 0.1em;
+}
+.approval-details {
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(113, 230, 255, 0.1);
+  padding: 12px;
+  margin-bottom: 20px;
+  text-align: left;
+  font-size: 11px;
+  letter-spacing: 0.15em;
+}
+.approval-row {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.approval-row:last-child {
+  margin-bottom: 0;
+}
+.approval-label {
+  color: var(--muted);
+}
+.approval-value {
+  color: var(--cyan);
+}
+.approval-prompt {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 24px;
+  font-style: italic;
+}
+.approval-buttons {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+}
+.approval-btn {
+  background: transparent;
+  border: 1px solid;
+  padding: 8px 16px;
+  font-size: 11px;
+  letter-spacing: 0.2em;
+  cursor: pointer;
+  transition: all 0.2s;
+  border-radius: 2px;
+}
+.approve-btn {
+  border-color: var(--green);
+  color: var(--green);
+}
+.approve-btn:hover {
+  background: rgba(140, 244, 189, 0.15);
+  box-shadow: 0 0 12px rgba(140, 244, 189, 0.4);
+}
+.deny-btn {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+.deny-btn:hover {
+  background: rgba(255, 143, 143, 0.15);
+  box-shadow: 0 0 12px rgba(255, 143, 143, 0.4);
+}
+.cancel-btn {
+  border-color: var(--muted);
+  color: var(--cyan-bright);
+}
+.cancel-btn:hover {
+  background: rgba(190, 224, 235, 0.1);
+}
 
 @keyframes coreFloat { 0%, 100% { transform: translateY(-5px); } 50% { transform: translateY(8px); } }
 @keyframes energyBreathe { 0%, 100% { transform: scale(.96); filter: brightness(.94); } 50% { transform: scale(1.07); filter: brightness(1.22); } }
@@ -626,6 +752,27 @@ body[data-ui-state="error"] .state-beacon { background: var(--danger); box-shado
 </div>
 <canvas id="ambientCanvas" aria-hidden="true"></canvas>
 <div class="atmosphere" aria-hidden="true"></div>
+
+<div id="approvalModal" class="approval-modal" aria-hidden="true" style="display: none;">
+  <div class="approval-title">AUTHORIZATION REQUIRED</div>
+  <div class="approval-action" id="approvalAction"></div>
+  <div class="approval-details">
+    <div class="approval-row">
+      <span class="approval-label">RISK LEVEL:</span>
+      <span class="approval-value" id="approvalRisk"></span>
+    </div>
+    <div class="approval-row">
+      <span class="approval-label">TARGET:</span>
+      <span class="approval-value" id="approvalTarget"></span>
+    </div>
+  </div>
+  <div class="approval-prompt" id="approvalPrompt"></div>
+  <div class="approval-buttons">
+    <button class="approval-btn approve-btn" onclick="sendApprovalResponse(true)">APPROVE</button>
+    <button class="approval-btn deny-btn" onclick="sendApprovalResponse(false)">DENY</button>
+    <button class="approval-btn cancel-btn" onclick="sendApprovalResponse(false)">CANCEL</button>
+  </div>
+</div>
 
 <main class="presence-shell">
   <section class="presence" aria-label="Holographic AI core">
@@ -730,7 +877,7 @@ body[data-ui-state="error"] .state-beacon { background: var(--danger); box-shado
   };
 
   function setVisualState(state) {
-    const allowed = ['idle', 'listening', 'thinking', 'speaking', 'executing', 'error'];
+    const allowed = ['idle', 'listening', 'thinking', 'speaking', 'executing', 'error', 'waiting_confirmation', 'approved', 'completed', 'cancelled', 'verifying', 'retrieving', 'searching', 'failed'];
     const normalized = allowed.includes(state) ? state : 'idle';
     document.body.dataset.uiState = normalized;
     $('coreScene').dataset.state = normalized;
@@ -1252,6 +1399,35 @@ body[data-ui-state="error"] .state-beacon { background: var(--danger); box-shado
   setupAmbientCanvas();
   setupCoreCanvas();
 
+  let currentApprovalId = null;
+  let stateTimeoutId = null;
+
+  window.sendApprovalResponse = function(result) {
+    if (!currentApprovalId) return;
+    socket.emit('approval_response', { id: currentApprovalId, result: result });
+    $('approvalModal').style.display = 'none';
+    currentApprovalId = null;
+    if (result) {
+      setVisualState('approved');
+      $('taskState').textContent = 'APPROVED';
+      setStatus('APPROVED', 'Authorization confirmed.');
+    } else {
+      setVisualState('cancelled');
+      $('taskState').textContent = 'CANCELLED';
+      setStatus('DENIED', 'Authorization rejected by user.');
+      
+      // Auto return to idle after 3 seconds for denied/cancelled
+      clearTimeout(stateTimeoutId);
+      stateTimeoutId = setTimeout(() => {
+        if ($('coreScene').dataset.state === 'cancelled') {
+          setVisualState('idle');
+          $('taskState').textContent = 'IDLE';
+          setStatus('STANDBY', 'Ready for your command...');
+        }
+      }, 3000);
+    }
+  };
+
   $('micButton').addEventListener('click', (event) => {
     event.stopPropagation();
     shouldListen = true;
@@ -1271,10 +1447,62 @@ body[data-ui-state="error"] .state-beacon { background: var(--danger); box-shado
     if (data.web) addNotice(data.web.diagnostic || 'Live web status received.');
   });
   socket.on('status', (data) => {
+    clearTimeout(stateTimeoutId);
     if (data.state === 'retrieving') { $('taskState').textContent = 'RETRIEVING'; setStatus('RETRIEVING', 'Checking the local knowledge base...'); }
     else if (data.state === 'verifying') { $('taskState').textContent = 'VERIFYING'; setStatus('VERIFYING', 'Running the configured answer check...'); }
     else if (data.state === 'thinking') { $('taskState').textContent = 'THINKING'; setStatus('THINKING', 'Understanding your request...'); }
     else if (data.state === 'executing') { $('taskState').textContent = 'EXECUTING'; setStatus('EXECUTING', data.message || 'Running autonomous engine...'); if (data.message) $('jarvisLive').textContent += `\n${data.message}`; }
+    else if (data.state === 'waiting_confirmation') { $('taskState').textContent = 'AUTHORIZATION'; setStatus('AUTHORIZATION', data.message || 'Waiting for user approval...'); setVisualState('waiting_confirmation'); }
+    else if (data.state === 'approved') { $('taskState').textContent = 'APPROVED'; setStatus('APPROVED', data.message || 'Action approved.'); setVisualState('approved'); }
+    else if (data.state === 'completed') { 
+      $('taskState').textContent = 'COMPLETED'; 
+      setStatus('COMPLETED', data.message || 'Action completed.'); 
+      setVisualState('completed');
+      stateTimeoutId = setTimeout(() => {
+        if ($('coreScene').dataset.state === 'completed') {
+          setVisualState('idle');
+          $('taskState').textContent = 'IDLE';
+          setStatus('STANDBY', 'Ready for your command...');
+        }
+      }, 3000);
+    }
+    else if (data.state === 'cancelled') { 
+      $('taskState').textContent = 'CANCELLED'; 
+      setStatus('CANCELLED', data.message || 'Action cancelled.'); 
+      setVisualState('cancelled');
+      stateTimeoutId = setTimeout(() => {
+        if ($('coreScene').dataset.state === 'cancelled') {
+          setVisualState('idle');
+          $('taskState').textContent = 'IDLE';
+          setStatus('STANDBY', 'Ready for your command...');
+        }
+      }, 3000);
+    }
+    else if (data.state === 'failed') { $('taskState').textContent = 'FAILED'; setStatus('FAILED', data.message || 'Action failed.'); setVisualState('failed'); }
+    else if (data.state === 'error') { $('taskState').textContent = 'ERROR'; setStatus('ERROR', data.message || 'Error occurred.'); setVisualState('error'); }
+  });
+  
+  socket.on('approval_request', (data) => {
+    currentApprovalId = data.id;
+    $('approvalAction').textContent = data.action_type || 'Unknown Action';
+    $('approvalRisk').textContent = (data.risk_level || 'UNKNOWN').toUpperCase();
+    
+    if (data.risk_level === 'high') {
+      $('approvalRisk').style.color = 'var(--danger)';
+    } else if (data.risk_level === 'low') {
+      $('approvalRisk').style.color = 'var(--green)';
+    } else {
+      $('approvalRisk').style.color = 'var(--amber)';
+    }
+    
+    $('approvalTarget').textContent = data.target || 'N/A';
+    $('approvalPrompt').textContent = data.prompt_text || 'JARVIS requires authorization to proceed with this action.';
+    $('approvalModal').style.display = 'block';
+    
+    setVisualState('waiting_confirmation');
+    $('taskState').textContent = 'AUTHORIZATION';
+    setStatus('AUTHORIZATION', 'User approval required.');
+    speakReply('Authorization required. Please review the pending action, Sir.');
   });
   socket.on('jarvis_reply_token', (data) => {
     if (data.is_first) { $('jarvisLive').textContent = data.token; $('taskState').textContent = 'GENERATING'; setStatus('THINKING', 'Streaming response...'); }
