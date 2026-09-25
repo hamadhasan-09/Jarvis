@@ -228,6 +228,7 @@ def test_empty_web_result_policy():
     server.WEB_ENABLED = True
     original_web_research = server.web_research
     original_generate = server.provider_manager.generate
+    original_stream_generate = server.provider_manager.stream_generate
 
     class EmptyWebResearch:
         last_error = ""
@@ -245,7 +246,19 @@ def test_empty_web_result_policy():
         captured.append(route)
         return ProviderResponse("The test model can answer this general question.", "fake", "test-model", {})
 
+    def fake_stream_generate(route, messages, **kwargs):
+        response = fake_generate(route, messages, **kwargs)
+        yield response.text
+        yield {
+            "__done__": True,
+            "provider": response.provider,
+            "model": response.model,
+            "fallback_used": False,
+            "full_text": response.text,
+        }
+
     server.provider_manager.generate = fake_generate
+    server.provider_manager.stream_generate = fake_stream_generate
     try:
         socket_client = server.socketio.test_client(server.app)
         socket_client.emit("user_speech", {"text": "search the web for who invented electricity", "request_id": "ordinary"})
@@ -260,6 +273,7 @@ def test_empty_web_result_policy():
         socket_client.disconnect()
     finally:
         server.provider_manager.generate = original_generate
+        server.provider_manager.stream_generate = original_stream_generate
         server.memory.close()
         server.knowledge.close()
         server.web_research = original_web_research
@@ -276,6 +290,7 @@ def test_live_http_and_socket_route():
     server.WEB_ENABLED = True
     server.task_router.verification_enabled = False
     original_web_research = server.web_research
+    original_stream_generate = server.provider_manager.stream_generate
 
     class FakeWebResearch:
         def context(self, query, top_k=5, max_chars=5000):
@@ -300,7 +315,19 @@ def test_live_http_and_socket_route():
         captured.append({"route": route, "messages": messages})
         return ProviderResponse("Acknowledged from the test provider.", "fake", "test-model", {"fallback_used": False})
 
+    def fake_stream_generate(route, messages, **kwargs):
+        response = fake_generate(route, messages, **kwargs)
+        yield response.text
+        yield {
+            "__done__": True,
+            "provider": response.provider,
+            "model": response.model,
+            "fallback_used": False,
+            "full_text": response.text,
+        }
+
     server.provider_manager.generate = fake_generate
+    server.provider_manager.stream_generate = fake_stream_generate
     server.provider_manager.verify = lambda *args, **kwargs: {
         "performed": False, "passed": None, "provider": None, "model": None, "reason": "disabled"
     }
@@ -363,6 +390,7 @@ def test_live_http_and_socket_route():
         assert "not contain enough information" in insufficient["text"]
         socket_client.disconnect()
     finally:
+        server.provider_manager.stream_generate = original_stream_generate
         server.memory.close()
         server.knowledge.close()
         server.web_research = original_web_research
