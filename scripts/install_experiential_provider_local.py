@@ -19,7 +19,7 @@ backup(MANAGER)
 manager = MANAGER.read_text(encoding="utf-8")
 
 if "from .experiential_provider import ExperientialProvider" not in manager:
-    imports = list(re.finditer(r"^from \\.\\.[A-Za-z0-9_]+_provider import .+$", manager, re.MULTILINE))
+    imports = list(re.finditer(r"^from \.[A-Za-z0-9_]+_provider import .+$", manager, re.MULTILINE))
     if not imports:
         raise SystemExit("ERROR: no local provider imports found in provider_manager.py")
     pos = imports[-1].end()
