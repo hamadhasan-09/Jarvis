@@ -222,6 +222,7 @@ class LocalVoiceListener:
                 "text": text,
                 "request_id": request_id,
                 "language_hint": language_hint,
+                "source": "local_voice",
             },
         )
 
