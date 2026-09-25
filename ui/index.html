@@ -57,66 +57,27 @@ body::after {
 }
 button { font: inherit; color: inherit; }
 
-/* Exact-image mode: the supplied reference is the visual source of truth. */
-#referenceVisual {
-  position: fixed;
-  inset: 0;
-  z-index: 0;
-  display: block;
-  width: 100vw;
-  height: 100vh;
-  object-fit: contain;
-  object-position: center center;
-  background: #02070d;
-  user-select: none;
-  -webkit-user-drag: none;
-  transform-origin: center center;
-  transition: transform .24s ease-out, filter .24s ease-out;
-}
-body[data-ui-state="idle"] #referenceVisual {
-  animation: idleCoreBreath 4.8s ease-in-out infinite;
-}
-body[data-ui-state="speaking"] #referenceVisual {
-  animation: jarvisCoreExpand 1.3s cubic-bezier(.22, .78, .2, 1) infinite;
-  filter: saturate(1.1) brightness(1.05);
-}
-body.user-speaking #referenceVisual {
-  animation: userCoreCompress .52s ease-in-out infinite alternate;
-  filter: saturate(1.04) brightness(.98);
-}
-@keyframes idleCoreBreath {
-  0%, 100% { transform: scale(1); }
-  50% { transform: scale(1.004); }
-}
-@keyframes jarvisCoreExpand {
-  0% { transform: scale(1); }
-  14% { transform: scale(1.024); }
-  50% { transform: scale(1.038); }
-  86%, 100% { transform: scale(1.018); }
-}
-@keyframes userCoreCompress {
-  from { transform: scale(1); }
+
   to { transform: scale(.974); }
 }
 #sonicWaves {
-  position: fixed;
-  inset: 0;
-  z-index: 2;
-  overflow: hidden;
+  position: absolute;
+  inset: -50%;
+  z-index: 1;
   pointer-events: none;
   visibility: hidden;
   opacity: 0;
-  transition: opacity .2s ease;
+  transition: opacity .15s ease;
 }
-body[data-ui-state="speaking"] #sonicWaves {
+.core-scene[data-state="speaking"] #sonicWaves {
   visibility: visible;
   opacity: 1;
 }
 .sonic-wave {
   position: absolute;
   left: 50%;
-  top: 47.2%;
-  width: clamp(220px, 23vw, 390px);
+  top: 50%;
+  width: 100%;
   aspect-ratio: 1;
   border: 1px solid rgba(113, 230, 255, .78);
   border-radius: 50%;
@@ -132,12 +93,12 @@ body[data-ui-state="speaking"] #sonicWaves {
   border-radius: 50%;
 }
 .sonic-wave.wave-two {
-  width: clamp(310px, 33vw, 540px);
+  width: 140%;
   border-color: rgba(113, 230, 255, .48);
   animation-delay: .42s;
 }
 .sonic-wave.wave-three {
-  width: clamp(410px, 43vw, 700px);
+  width: 180%;
   border-color: rgba(255, 190, 108, .32);
   animation-delay: .84s;
 }
@@ -148,15 +109,12 @@ body[data-ui-state="speaking"] #sonicWaves {
   36% { opacity: .52; transform: translate(-50%, -50%) scale(.92); }
   100% { opacity: 0; transform: translate(-50%, -50%) scale(1.06); }
 }
-body::before,
-body::after { display: none; }
-body > #ambientCanvas,
-body > .atmosphere,
-body > .presence-shell,
-body > .utility-strip {
-  visibility: hidden;
-  pointer-events: none;
+  8% { opacity: .62; transform: translate(-50%, -50%) scale(.79); }
+  14% { opacity: .84; transform: translate(-50%, -50%) scale(.84); }
+  36% { opacity: .52; transform: translate(-50%, -50%) scale(.92); }
+  100% { opacity: 0; transform: translate(-50%, -50%) scale(1.06); }
 }
+
 #micButton {
   position: fixed !important;
   inset: 0 !important;
@@ -231,7 +189,7 @@ body > .utility-strip {
   transform: translateY(0) scale(1);
   transform-style: preserve-3d;
   animation: coreFloat 8.5s ease-in-out infinite;
-  transition: transform 1.2s ease, filter 1.2s ease;
+  transition: transform .15s ease, filter .15s ease;
   filter: drop-shadow(0 0 26px rgba(46, 176, 218, .16));
 }
 .core-scene::before {
@@ -347,7 +305,7 @@ body > .utility-strip {
   border: 1px solid rgba(111, 228, 255, .42);
   transform-style: preserve-3d;
   pointer-events: none;
-  transition: opacity .8s ease, border-color .8s ease, filter .8s ease;
+  transition: opacity .15s ease, border-color .15s ease, filter .15s ease;
 }
 .core-ring::before,
 .core-ring::after {
@@ -417,7 +375,7 @@ body > .utility-strip {
     0 0 76px rgba(255, 143, 45, .56),
     inset 0 0 20px rgba(255, 255, 226, .96);
   animation: energyBreathe 3.4s ease-in-out infinite;
-  transition: filter .8s ease, box-shadow .8s ease, transform .8s ease;
+  transition: filter .15s ease, box-shadow .15s ease, transform .15s ease;
 }
 .core-center::before {
   content: "";
@@ -576,7 +534,7 @@ body[data-ui-state="idle"] .presence-copy { opacity: .58; }
 .core-scene[data-state="thinking"] .core-ring { border-color: rgba(128, 239, 255, .76); }
 .core-scene[data-state="thinking"] .core-center { filter: brightness(1.2); }
 .core-scene[data-state="speaking"] { --state-speed: 1.3; filter: drop-shadow(0 0 38px rgba(255, 184, 92, .32)); }
-.core-scene[data-state="speaking"] .core-center { animation-duration: 1.25s; transform: scale(1.075); }
+.core-scene[data-state="speaking"] .core-center { animation: speakingPulse 1.3s cubic-bezier(.22, .78, .2, 1) infinite; }
 .core-scene[data-state="speaking"]::before { transform: scale(1.28); opacity: .86; }
 .core-scene[data-state="executing"] { --state-speed: 2.65; transform: scale(1.045); filter: drop-shadow(0 0 48px rgba(255, 186, 91, .3)); }
 .core-scene[data-state="executing"] .core-ring { border-color: rgba(255, 197, 119, .66); }
@@ -712,7 +670,11 @@ body[data-ui-state="error"] .state-beacon, body[data-ui-state="failed"] .state-b
 }
 
 @keyframes coreFloat { 0%, 100% { transform: translateY(-5px); } 50% { transform: translateY(8px); } }
-@keyframes energyBreathe { 0%, 100% { transform: scale(.96); filter: brightness(.94); } 50% { transform: scale(1.07); filter: brightness(1.22); } }
+@keyframes speakingPulse { 
+  0%, 100% { transform: scale(1); filter: brightness(1.05); } 
+  50% { transform: scale(1.038); filter: brightness(1.25); box-shadow: 0 0 16px var(--amber-bright), 0 0 50px rgba(255, 191, 92, .8), 0 0 100px rgba(255, 143, 45, .5); } 
+}
+@keyframes energyBreathe { 0%, 100% { transform: scale(.99); filter: brightness(.98); } 50% { transform: scale(1.01); filter: brightness(1.02); } }
 @keyframes innerPulse { 0%, 100% { opacity: .48; transform: scale(.94); } 50% { opacity: 1; transform: scale(1.06); } }
 @keyframes coreTexture { to { rotate: 360deg; } }
 @keyframes beaconPulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: .42; transform: scale(.7); } }
@@ -744,12 +706,8 @@ body[data-ui-state="error"] .state-beacon, body[data-ui-state="failed"] .state-b
 </style>
 </head>
 <body data-ui-state="idle">
-<img id="referenceVisual" src="/ui/assets/jarvis-reference-core.png" alt="" aria-hidden="true" data-reference-visual="supplied-image">
-<div id="sonicWaves" aria-hidden="true">
-  <span class="sonic-wave wave-one"></span>
-  <span class="sonic-wave wave-two"></span>
-  <span class="sonic-wave wave-three"></span>
-</div>
+
+
 <canvas id="ambientCanvas" aria-hidden="true"></canvas>
 <div class="atmosphere" aria-hidden="true"></div>
 
@@ -778,6 +736,11 @@ body[data-ui-state="error"] .state-beacon, body[data-ui-state="failed"] .state-b
   <section class="presence" aria-label="Holographic AI core">
     <div class="reflection-floor" aria-hidden="true"></div>
     <div class="core-scene" id="coreScene" data-state="idle">
+      <div id="sonicWaves" aria-hidden="true">
+  <span class="sonic-wave wave-one"></span>
+  <span class="sonic-wave wave-two"></span>
+  <span class="sonic-wave wave-three"></span>
+</div>
       <div class="axis-beam" aria-hidden="true"></div>
       <div class="pole-ring top" aria-hidden="true"></div>
       <div class="pole-ring bottom" aria-hidden="true"></div>
@@ -823,16 +786,7 @@ body[data-ui-state="error"] .state-beacon, body[data-ui-state="failed"] .state-b
   <span id="taskState">STANDBY</span>
 </div>
 
-<div class="runtime-data" aria-hidden="true">
-  <span id="voiceState">VOICE CHANNEL • AUTO • AUTO</span>
-  <span id="footerStatus">LISTENING 24/7</span>
-  <span id="clock"></span><span id="battery"></span><span id="uptime"></span>
-  <span id="modelLabel"></span><span id="retrievalStatus"></span><span id="memoryStats"></span>
-  <span id="taskTitle"></span><span id="taskDetail"></span><span id="commandCount">0</span>
-  <span id="cpuMetric"></span><span id="ramMetric"></span>
-  <i id="cpuMeter"></i><i id="ramMeter"></i>
-  <ul id="historyList"></ul><ul id="noticeList"></ul>
-</div>
+
 
 <script>
 (() => {
@@ -903,46 +857,17 @@ body[data-ui-state="error"] .state-beacon, body[data-ui-state="failed"] .state-b
     setVisualState(speaking ? 'speaking' : stateFromLabel(label));
   }
 
-  function addNotice(text) {
-    const list = $('noticeList');
-    const item = document.createElement('li');
-    item.innerHTML = '<span></span><span></span>';
-    item.lastElementChild.textContent = text;
-    list.prepend(item);
-    while (list.children.length > 3) list.lastElementChild.remove();
-  }
+  
 
-  function addCommand(text) {
-    if (!text) return;
-    const now = new Date();
-    const time = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    commandHistory.unshift({ time, text });
-    commandHistory.splice(5);
-    $('commandCount').textContent = String(commandHistory.length);
-    $('historyList').innerHTML = commandHistory.map((item) => `<li><span>${item.time}</span><span>${escapeHtml(item.text)}</span></li>`).join('');
-  }
+  
 
   function escapeHtml(value) {
     return String(value).replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[char]));
   }
 
-  function updateClock() {
-    $('clock').textContent = new Date().toLocaleString([], { weekday: 'short', month: 'short', day: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
-    const elapsed = Math.floor((Date.now() - startedAt) / 1000);
-    const h = String(Math.floor(elapsed / 3600)).padStart(2, '0');
-    const m = String(Math.floor((elapsed % 3600) / 60)).padStart(2, '0');
-    const s = String(elapsed % 60).padStart(2, '0');
-    $('uptime').textContent = `UPTIME: ${h}:${m}:${s}`;
-  }
+  
 
-  async function updateBattery() {
-    try {
-      if (!navigator.getBattery) return;
-      const battery = await navigator.getBattery();
-      const update = () => { $('battery').textContent = `BATTERY ${Math.round(battery.level * 100)}%${battery.charging ? ' • CHARGING' : ''}`; };
-      update(); battery.addEventListener('levelchange', update); battery.addEventListener('chargingchange', update);
-    } catch (_) { $('battery').textContent = 'BATTERY N/A'; }
-  }
+  
 
   function detectLanguageHint(text) {
     if (/[\u0600-\u06FF]/.test(text)) return 'urdu_script';
@@ -1037,11 +962,11 @@ body[data-ui-state="error"] .state-beacon, body[data-ui-state="failed"] .state-b
     if (control.gender) preferredVoiceGender = control.gender;
     if (control.language) preferredVoiceLanguage = control.language;
     saveVoicePreferences();
-    addCommand(text);
+    
     $('jarvisLive').textContent = localVoiceConfirmation(control);
-    $('taskTitle').textContent = 'Voice preference updated';
-    $('taskDetail').textContent = `${voiceLanguageLabel()} • ${voiceGenderLabel()}`;
-    addNotice(`Voice: ${voiceLanguageLabel()} • ${voiceGenderLabel()}`);
+    
+    
+    
     speakReply($('jarvisLive').textContent);
     restartRecognitionForPreference();
     return true;
@@ -1053,9 +978,9 @@ body[data-ui-state="error"] .state-beacon, body[data-ui-state="failed"] .state-b
       if (!pendingRequests.has(requestId)) return;
       pendingRequests.delete(requestId);
       $('taskState').textContent = 'RETRY READY';
-      $('taskTitle').textContent = 'No response received';
-      $('taskDetail').textContent = 'The command channel is still listening.';
-      addNotice('No response arrived for one command; voice listening remains active.');
+      
+      
+      
       setStatus('LISTENING', 'No response received. Ready for your next command.');
     }, 40000);
     pendingRequests.set(requestId, timeout);
@@ -1086,9 +1011,9 @@ body[data-ui-state="error"] .state-beacon, body[data-ui-state="failed"] .state-b
     lastSentText = normalized;
     lastSentAt = now;
     if (handleVoiceControl(normalized)) return;
-    addCommand(normalized);
-    $('taskTitle').textContent = 'Processing command...';
-    $('taskDetail').textContent = normalized;
+    
+    
+    
     setStatus('PROCESSING', 'Understanding your request...');
     sendQuestion(normalized, detectLanguageHint(normalized));
   }
@@ -1165,7 +1090,7 @@ body[data-ui-state="error"] .state-beacon, body[data-ui-state="failed"] .state-b
       if (permissionError) {
         shouldListen = false;
         setStatus('MICROPHONE PERMISSION NEEDED', 'Allow microphone access, then tap the core once.');
-        addNotice('Microphone permission is required for hands-free voice.');
+        
         return;
       }
       if (shouldListen) scheduleRecognitionRestart();
@@ -1236,7 +1161,7 @@ body[data-ui-state="error"] .state-beacon, body[data-ui-state="failed"] .state-b
     if (!text) return;
     if (!synth || typeof SpeechSynthesisUtterance === 'undefined') {
       setStatus('TEXT ONLY', 'This browser does not provide speech output.');
-      addNotice('Browser speech output is unavailable. Use current Chrome or Edge.');
+      
       return;
     }
     const voices = refreshSpeechVoices();
@@ -1256,7 +1181,7 @@ body[data-ui-state="error"] .state-beacon, body[data-ui-state="failed"] .state-b
         const genderPattern = preferredVoiceGender === 'female'
           ? /female|woman|girl|jenny|zira|aria|samantha|susan|hazel|eva|sara|swara|uzma|google uk english female/i
           : /male|man|guy|david|mark|ryan|daniel|george|madhur|asad|google uk english male/i;
-        if (!genderPattern.test(voice.name || '')) addNotice(`No named ${preferredVoiceGender} ${output.language} voice was found; using ${voice.name || 'browser default'} with pitch adjustment.`);
+        if (!genderPattern.test(voice.name || '')) 
       }
       utterance.onstart = () => { stopUserSpeechPulse(); isJarvisSpeaking = true; setStatus('RESPONDING', 'JARVIS is speaking...', true); };
       utterance.onend = () => { isJarvisSpeaking = false; currentSpeechText = ''; setStatus('LISTENING', 'Ready for your command...'); };
@@ -1266,7 +1191,7 @@ body[data-ui-state="error"] .state-beacon, body[data-ui-state="failed"] .state-b
         currentSpeechText = '';
         if (event.error !== 'interrupted' && event.error !== 'canceled') {
           setStatus('AUDIO OUTPUT ERROR', 'Text reply received, but the browser could not speak it.');
-          addNotice(`Speech output error: ${event.error || 'unknown browser audio error'}.`);
+          
         } else setStatus('LISTENING', 'Ready for your command...');
       };
       synth.speak(utterance);
@@ -1274,7 +1199,7 @@ body[data-ui-state="error"] .state-beacon, body[data-ui-state="failed"] .state-b
       isJarvisSpeaking = false;
       currentSpeechText = '';
       setStatus('AUDIO OUTPUT ERROR', 'Text reply received, but speech output failed.');
-      addNotice(`Speech output exception: ${error.message || 'unknown browser error'}.`);
+      
     }
   }
 
@@ -1435,16 +1360,12 @@ body[data-ui-state="error"] .state-beacon, body[data-ui-state="failed"] .state-b
     if (!recognition || (!recognitionActive && !recognitionStarting)) setupSpeechRecognition();
   });
   window.addEventListener('click', () => { unlockSpeechOutput(); if (!recognitionActive && !recognitionStarting) setupSpeechRecognition(); });
-  socket.on('connect', () => { $('connectionLabel').textContent = 'ONLINE'; addNotice('Secure Socket.IO connection established.'); if (!recognitionActive && !recognitionStarting) setupSpeechRecognition(); });
+  socket.on('connect', () => { $('connectionLabel').textContent = 'ONLINE';  if (!recognitionActive && !recognitionStarting) setupSpeechRecognition(); });
   socket.on('disconnect', () => { $('connectionLabel').textContent = 'RECONNECTING'; setStatus('RECONNECTING', 'Restoring live command channel...'); });
   socket.on('system_status', (data) => {
-    $('modelLabel').textContent = `MODEL: ${data.model || 'ONLINE'}`;
-    if (data.memory) $('memoryStats').textContent = `MEMORY: ${data.memory.facts || 0} FACTS`;
-    if (data.knowledge) {
-      $('retrievalStatus').textContent = `KNOWLEDGE: ${data.knowledge.backend === 'disabled' ? 'OFF' : `${data.knowledge.chunks || 0} CHUNKS`}`;
-      addNotice(data.knowledge.diagnostic || 'Knowledge status received.');
+    if (data.model) {
+      console.log('System status received:', data.model);
     }
-    if (data.web) addNotice(data.web.diagnostic || 'Live web status received.');
   });
   socket.on('status', (data) => {
     clearTimeout(stateTimeoutId);
@@ -1513,21 +1434,11 @@ body[data-ui-state="error"] .state-beacon, body[data-ui-state="failed"] .state-b
     const text = data.text || '';
     $('jarvisLive').textContent = text;
     $('taskState').textContent = 'IDLE';
-    $('taskTitle').textContent = 'Waiting for your command...';
-    const sourceCount = Array.isArray(data.sources) ? data.sources.length : 0;
-    const verification = data.verification && data.verification.performed ? ' • VERIFIED' : '';
-    const retrievalLabel = data.web_retrieval_active ? ' • LIVE WEB' : (sourceCount ? ' • LOCAL DOCS' : '');
-    $('taskDetail').textContent = data.memory_command ? 'Memory command completed' : `${data.task_type || 'GENERAL'} • ${data.provider || 'local'}${sourceCount ? ` • ${sourceCount} source(s)` : ''}${retrievalLabel}${verification}`;
-    $('modelLabel').textContent = `MODEL: ${data.provider && data.model ? `${data.provider}/${data.model}` : 'ONLINE'}`;
-    $('retrievalStatus').textContent = data.web_retrieval_active ? `WEB: ${sourceCount} SOURCES` : (data.retrieval_active ? `KNOWLEDGE: ${sourceCount} SOURCES` : 'KNOWLEDGE: INACTIVE');
-    addNotice(data.retrieval_active ? `Response grounded in ${sourceCount} retrieved source(s).` : 'Response delivered successfully.');
     setVisualState('idle');
     speakReply(text);
   });
-  socket.on('memory_stats', (data) => { $('memoryStats').textContent = `MEMORY: ${data.facts || 0} FACTS`; });
-  socket.on('metrics', (data) => { $('cpuMetric').textContent = `${data.cpu}%`; $('ramMetric').textContent = `${data.ram_used}/${data.ram_total} GB`; });
-  setInterval(() => { socket.emit('get_metrics'); updateClock(); }, 3000);
-  updateClock(); updateBattery();
+      
+  
 })();
 </script>
 </body>
