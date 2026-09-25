@@ -62,11 +62,15 @@ class ExperientialProvider(BaseProvider):
             "model": self.model,
             "messages": payload,
             "max_tokens": 600 if max_tokens is None else int(max_tokens),
-            "stream": bool(stream),
         }
 
-        # Experiential Claude Opus routes reject arbitrary temperature values.
-        # Omit temperature so the gateway uses the route-supported default.
+        # Match the proven Experiential Claude request shape. Claude Opus
+        # routes reject arbitrary temperature values, so omit temperature.
+        # For normal requests, omit stream=false because the gateway's
+        # successful non-streaming response does not require that field.
+        if stream:
+            result["stream"] = True
+
         if not self.model.startswith("claude-opus"):
             result["temperature"] = 0.65 if temperature is None else float(temperature)
 
