@@ -105,7 +105,8 @@ Be thorough. Include verification steps. Mark risky steps for approval."""
             response = self.provider_manager.generate(
                 route,
                 [{"role": "user", "content": prompt}],
-                temperature=0.3
+                temperature=0.3,
+                max_tokens=None
             )
             plan_data = self._parse_json(response.text)
 
