@@ -21,6 +21,7 @@ class SecureKeyManager:
             "anthropic": "ANTHROPIC_API_KEY",
             "google": "GOOGLE_API_KEY",
             "groq": "GROQ_API_KEY",
+            "experiential": "EXPERIENTIAL_API_KEY",
         }
 
     def get_key(self, service):
@@ -91,7 +92,8 @@ class SecureKeyManager:
                 "openai": "https://platform.openai.com/api-keys",
                 "groq": "https://console.groq.com/keys (FREE!)",
                 "google": "https://aistudio.google.com/apikey",
-                "anthropic": "https://console.anthropic.com/"
+                "anthropic": "https://console.anthropic.com/",
+                "experiential": "https://experientiallabs.ai/"
             }
             print(f"  {urls.get(service, 'provider website')}")
 
