@@ -1,0 +1,5 @@
+{
+    "name": "Web Development",
+    "trigger_keywords": ["website", "web app", "html", "css", "javascript", "react", "frontend", "backend", "web development"],
+    "sop": "1. Analyze requirements and decide on the tech stack (prefer lightweight HTML/CSS/JS or simple Python Flask backends unless specified otherwise).\n2. Create a dedicated project folder inside the workspace.\n3. Scaffold the project files (index.html, styles.css, app.js, app.py) using the terminal and python file write operations.\n4. Write the core logic.\n5. Test the code locally by starting a local server (e.g., `python -m http.server`) if requested.\n6. Notify the user of the path and how to view it."
+}

@@ -1,0 +1,5 @@
+{
+    "name": "Video Editing",
+    "trigger_keywords": ["video", "edit video", "ffmpeg", "mp4", "crop video", "trim video", "audio extract"],
+    "sop": "1. Ask the user for the exact path of the source video file if not provided.\n2. Determine the requested editing operation (trimming, cropping, format conversion, audio extraction, merging).\n3. Generate the correct `ffmpeg` command. (Assume ffmpeg is installed and available in the system PATH).\n4. Write a python script using `subprocess.run` to execute the ffmpeg command, ensuring output goes to a clearly named output file (e.g., `output_edited.mp4`).\n5. Execute the python script via the tools.\n6. Confirm success and provide the path to the newly edited video."
+}

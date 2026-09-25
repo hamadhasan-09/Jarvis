@@ -1,0 +1,5 @@
+{
+    "name": "Content Creation & Email",
+    "trigger_keywords": ["email", "draft", "write", "content", "blog", "article", "post", "newsletter", "copywriting"],
+    "sop": "1. Identify the target audience, tone, and main message of the content.\n2. Draft the content directly. For long-form content, break it down into sections (Intro, Body, Conclusion).\n3. If requested, use Python file operations to save the drafted content as a `.md` or `.txt` file in a dedicated `drafts` folder.\n4. Present the final draft to the user for review.\n5. If the user asks to send an email, explain that you have drafted it and provide a python script using `smtplib` as an option if they wish to configure their credentials, but default to just providing the text."
+}

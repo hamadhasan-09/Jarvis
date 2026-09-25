@@ -1,0 +1,39 @@
+jarvis:
+  name: "JARVIS"
+  version: "5.0"
+
+security:
+  max_retries: 3
+  checkpoint_enabled: true
+
+memory:
+  persist: true
+  max_context_messages: 20
+  db_path: "data/memory/jarvis.db"
+  semantic_search: true
+  explicit_facts_only: true
+  redact_secrets: true
+  max_context_characters: 4500
+
+models:
+  prefer_local: false
+  max_cost_per_task: 0.50
+
+providers:
+  primary: "groq"
+  primary_model: "openai/gpt-oss-120b"
+  fallback: "groq"
+  fallback_model: "openai/gpt-oss-20b"
+  enable_gemini: false
+  enable_anthropic: false
+  timeout_seconds: 18
+
+knowledge:
+  enabled: true
+  top_k: 5
+  documents_dir: "data/knowledge/documents"
+  vector_backend: "chroma_optional_sqlite_fallback"
+
+verification:
+  enabled: false
+  task_types: "RESEARCH,KNOWLEDGE_QA,CODING"
