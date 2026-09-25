@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import os
+import subprocess
 import threading
 import time
 import uuid
@@ -63,8 +64,16 @@ class LocalVoiceListener:
 
         @self.socket.on("jarvis_reply")
         def on_reply(data):
-            text = str((data or {}).get("text", ""))
-            # Give browser TTS time to finish before reopening the capture window.
+            text = str((data or {}).get("text", "")).strip()
+            if text:
+                threading.Thread(
+                    target=self._speak,
+                    args=(text,),
+                    name="jarvis-local-tts",
+                    daemon=True,
+                ).start()
+            # Keep the microphone closed while JARVIS is speaking so its
+            # Windows TTS output is not immediately transcribed as user input.
             duration = max(1.5, min(8.0, len(text.split()) * 0.28))
             self.suppress_until = time.monotonic() + duration
 
@@ -86,6 +95,24 @@ class LocalVoiceListener:
             self.socket.disconnect()
         except Exception:
             pass
+
+    def _speak(self, text: str) -> None:
+        """Speak the JARVIS reply through Windows system TTS."""
+        safe = str(text).replace("'", "''")
+        command = (
+            "$s=New-Object System.Speech.Synthesis.SpeechSynthesizer;"
+            "$s.Speak('" + safe + "');"
+            "$s.Dispose()"
+        )
+        try:
+            subprocess.run(
+                ["powershell", "-NoProfile", "-Command", command],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception as exc:
+            print(f"[LOCAL VOICE] TTS error: {type(exc).__name__}: {exc}")
 
     def _connect_socket(self) -> None:
         if self.socket.connected:
