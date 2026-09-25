@@ -58,13 +58,19 @@ class ExperientialProvider(BaseProvider):
             else:
                 payload.insert(0, {"role": "system", "content": system_prompt})
 
-        return {
+        result = {
             "model": self.model,
             "messages": payload,
-            "temperature": 0.65 if temperature is None else float(temperature),
             "max_tokens": 600 if max_tokens is None else int(max_tokens),
             "stream": bool(stream),
         }
+
+        # Experiential Claude Opus routes reject arbitrary temperature values.
+        # Omit temperature so the gateway uses the route-supported default.
+        if not self.model.startswith("claude-opus"):
+            result["temperature"] = 0.65 if temperature is None else float(temperature)
+
+        return result
 
     @staticmethod
     def _extract_response(data: dict[str, Any]) -> tuple[str, dict[str, Any]]:
