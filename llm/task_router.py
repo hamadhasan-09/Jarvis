@@ -44,6 +44,7 @@ class RouteDecision:
     verification_model: str | None = None
     verify: bool = False
     reason: str = ""
+    task_type: str = GENERAL
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -160,6 +161,7 @@ class TaskRouter:
             verification_model=verification_model,
             verify=bool(task.requires_verification),
             reason=reason,
+            task_type=task.task_type,
         )
 
 
