@@ -111,8 +111,8 @@ if "local_voice_request" not in server:
     h_start = server.index("@socketio.on(\"user_speech\")")
     h_end = server.index("@socketio.on(\"get_memory_stats\")", h_start)
     handler = server[h_start:h_end]
-    import re
-    handler = re.sub(r"(?m)^(\s*)emit\\(", r"\\1route_emit(", handler)
+    handler = handler.replace("        emit(", "        route_emit(", 0)
+    handler = handler.replace("    emit(", "    route_emit(", 0)
     server = server[:h_start] + handler + server[h_end:]
 
 if "from voice.local_listener import LocalVoiceListener" not in server:
