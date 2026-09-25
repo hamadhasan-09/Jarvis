@@ -15,6 +15,7 @@ from .experiential_provider import ExperientialProvider
 from .base_provider import ProviderError, ProviderResponse, ProviderUnavailable, sanitize_error
 from .gemini_provider import GeminiProvider
 from .groq_provider import GroqProvider
+from .token_budget import budget_for
 
 
 class ProviderManager:
@@ -108,11 +109,12 @@ class ProviderManager:
         route,
         messages: list[dict[str, str]],
         temperature: float = 0.65,
-        max_tokens: int = 600,
+        max_tokens: int | None = None,
         timeout: float | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> ProviderResponse:
         """Try the selected provider, then the explicitly configured fallback."""
+        resolved_max_tokens = int(max_tokens) if max_tokens is not None else budget_for(getattr(route, "task_type", "GENERAL"))
         candidates = [
             (route.primary_provider, route.primary_model, False),
             (route.fallback_provider, route.fallback_model, True),
@@ -132,7 +134,7 @@ class ProviderManager:
                     lambda: provider.generate(
                         messages=messages,
                         temperature=temperature,
-                        max_tokens=max_tokens,
+                        max_tokens=resolved_max_tokens,
                         timeout=call_timeout,
                         metadata=metadata,
                     ),
@@ -156,7 +158,7 @@ class ProviderManager:
         route,
         messages: list[dict[str, str]],
         temperature: float = 0.65,
-        max_tokens: int = 600,
+        max_tokens: int | None = None,
         timeout: float | None = None,
         metadata: dict[str, Any] | None = None,
     ):
@@ -170,6 +172,7 @@ class ProviderManager:
         complete text as one chunk followed by the sentinel.
         """
         call_timeout = max(1.0, float(timeout or self.timeout))
+        resolved_max_tokens = int(max_tokens) if max_tokens is not None else budget_for(getattr(route, "task_type", "GENERAL"))
         candidates = [
             (route.primary_provider, route.primary_model, False),
             (route.fallback_provider, route.fallback_model, True),
@@ -188,7 +191,7 @@ class ProviderManager:
                     for delta in provider.stream(
                         messages=messages,
                         temperature=temperature,
-                        max_tokens=max_tokens,
+                        max_tokens=resolved_max_tokens,
                         timeout=call_timeout,
                         metadata=metadata,
                     ):
@@ -213,7 +216,7 @@ class ProviderManager:
                     lambda: provider.generate(
                         messages=messages,
                         temperature=temperature,
-                        max_tokens=max_tokens,
+                        max_tokens=resolved_max_tokens,
                         timeout=call_timeout,
                         metadata=metadata,
                     ),
