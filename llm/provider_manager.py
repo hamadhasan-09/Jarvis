@@ -11,6 +11,7 @@ from typing import Any
 from security_v2.key_manager import SecureKeyManager
 
 from .anthropic_provider import AnthropicProvider
+from .experiential_provider import ExperientialProvider
 from .base_provider import ProviderError, ProviderResponse, ProviderUnavailable, sanitize_error
 from .gemini_provider import GeminiProvider
 from .groq_provider import GroqProvider
@@ -53,6 +54,37 @@ class ProviderManager:
             provider = AnthropicProvider(self.keys.get_key("anthropic"), model, timeout=self.timeout)
             if provider.is_configured:
                 self.providers[("anthropic", model)] = provider
+
+        if _env_bool("JARVIS_ENABLE_EXPERIENTIAL", False):
+            models = {
+                os.getenv("JARVIS_EXPERIENTIAL_MODEL", "claude-opus-5.5").strip(),
+                os.getenv("JARVIS_PRIMARY_MODEL", "").strip()
+                if os.getenv("JARVIS_PRIMARY_PROVIDER", "").strip().lower() == "experiential"
+                else "",
+                os.getenv("JARVIS_REASONING_MODEL", "").strip()
+                if os.getenv("JARVIS_REASONING_PROVIDER", "").strip().lower() == "experiential"
+                else "",
+                os.getenv("JARVIS_CODING_MODEL", "").strip()
+                if os.getenv("JARVIS_CODING_PROVIDER", "").strip().lower() == "experiential"
+                else "",
+                os.getenv("JARVIS_VERIFICATION_MODEL", "").strip()
+                if os.getenv("JARVIS_VERIFICATION_PROVIDER", "").strip().lower() == "experiential"
+                else "",
+            }
+            base_url = os.getenv(
+                "EXPERIENTIAL_BASE_URL",
+                "https://api.experientiallabs.ai/v1",
+            ).strip()
+            key = self.keys.get_key("experiential")
+            for model in {item for item in models if item}:
+                provider = ExperientialProvider(
+                    key,
+                    model,
+                    timeout=self.timeout,
+                    base_url=base_url,
+                )
+                if provider.is_configured:
+                    self.providers[("experiential", model)] = provider
 
     @property
     def has_primary(self) -> bool:
