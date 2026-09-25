@@ -1,0 +1,142 @@
+from __future__ import annotations
+
+from pathlib import Path
+import subprocess
+
+ROOT = Path(__file__).resolve().parent.parent
+SERVER = ROOT / "ui" / "server.py"
+CONFIG = ROOT / "ui" / "hud" / "config.js"
+VOICE = ROOT / "ui" / "hud" / "voice.js"
+
+def backup(path: Path, suffix: str = ".local-voice-backup") -> None:
+    backup_path = path.with_suffix(path.suffix + suffix)
+    if path.exists() and not backup_path.exists():
+        backup_path.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+        print("BACKUP", backup_path)
+
+def git_show(path: str) -> str:
+    return subprocess.check_output(
+        ["git", "show", f"origin/feature/local-windows-voice:{path}"],
+        cwd=ROOT,
+        text=True,
+        encoding="utf-8",
+    )
+
+# Install the new listener package directly from the fetched branch.
+(ROOT / "voice").mkdir(parents=True, exist_ok=True)
+(ROOT / "voice" / "__init__.py").write_text(
+    git_show("voice/__init__.py"), encoding="utf-8"
+)
+(ROOT / "voice" / "local_listener.py").write_text(
+    git_show("voice/local_listener.py"), encoding="utf-8"
+)
+print("INSTALLED voice/local_listener.py")
+
+# Browser HUD: local Windows voice owns the microphone.
+backup(CONFIG)
+config = CONFIG.read_text(encoding="utf-8")
+if "localVoiceMode:" not in config:
+    marker = "  socket: Object.freeze({"
+    if marker not in config:
+        raise SystemExit("ERROR: ui/hud/config.js socket marker not found")
+    config = config.replace(
+        marker,
+        "  localVoiceMode: true,\n" + marker,
+        1,
+    )
+    CONFIG.write_text(config, encoding="utf-8")
+    print("PATCHED ui/hud/config.js")
+else:
+    print("UNCHANGED ui/hud/config.js")
+
+backup(VOICE)
+voice = VOICE.read_text(encoding="utf-8")
+
+if "HUD_CONFIG.localVoiceMode" not in voice:
+    marker = "  async requestPermission(fromGesture = false) {"
+    if marker not in voice:
+        raise SystemExit("ERROR: VoiceInterface.requestPermission marker not found")
+    voice = voice.replace(
+        marker,
+        marker + """
+    if (HUD_CONFIG.localVoiceMode) {
+      this.microphonePermissionState = "local";
+      return true;
+    }
+""",
+        1,
+    )
+
+    start_marker = "  async start(fromGesture = false) {"
+    if start_marker not in voice:
+        raise SystemExit("ERROR: VoiceInterface.start marker not found")
+    voice = voice.replace(
+        start_marker,
+        start_marker + """
+    if (HUD_CONFIG.localVoiceMode) {
+      this.shouldListen = true;
+      this.setPermissionGate(false);
+      this.onStatus("LISTENING", "Local Windows voice channel is active.", "listening");
+      return true;
+    }
+""",
+        1,
+    )
+    VOICE.write_text(voice, encoding="utf-8")
+    print("PATCHED ui/hud/voice.js")
+else:
+    print("UNCHANGED ui/hud/voice.js")
+
+# Server: start the local listener only in the real process, never on import.
+backup(SERVER)
+server = SERVER.read_text(encoding="utf-8")
+
+if "from voice.local_listener import LocalVoiceListener" not in server:
+    marker = "from backend.approval_service import BrowserApprovalGateway  # noqa: E402\n"
+    if marker not in server:
+        raise SystemExit("ERROR: server.py import marker not found")
+    server = server.replace(
+        marker,
+        marker + "from voice.local_listener import LocalVoiceListener  # noqa: E402\n",
+        1,
+    )
+
+if "JARVIS_LOCAL_VOICE" not in server:
+    marker = 'if __name__ == "__main__":\n'
+    if marker not in server:
+        raise SystemExit("ERROR: server __main__ marker not found")
+    block = '''if __name__ == "__main__":
+    local_voice = None
+    if env_bool("JARVIS_LOCAL_VOICE", False):
+        local_voice = LocalVoiceListener(
+            host=JARVIS_HOST,
+            port=JARVIS_PORT,
+            language=os.getenv("JARVIS_STT_LANGUAGE", "en-US").strip() or "en-US",
+        )
+        local_voice.start()
+
+'''
+    server = server.replace(marker, block, 1)
+
+    # Replace the original bare socketio.run call with lifecycle-safe shutdown.
+    old = '    socketio.run(app, host=JARVIS_HOST, port=JARVIS_PORT, debug=False, allow_unsafe_werkzeug=True)\n'
+    if old not in server:
+        raise SystemExit("ERROR: socketio.run line not found")
+    new = '''    try:
+        socketio.run(
+            app,
+            host=JARVIS_HOST,
+            port=JARVIS_PORT,
+            debug=False,
+            allow_unsafe_werkzeug=True,
+        )
+    finally:
+        if local_voice is not None:
+            local_voice.stop()
+'''
+    server = server.replace(old, new, 1)
+
+SERVER.write_text(server, encoding="utf-8")
+print("PATCHED ui/server.py")
+
+print("DONE")
