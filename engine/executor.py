@@ -11,7 +11,7 @@ class Executor:
         self.provider_manager = provider_manager
         self.gateway = gateway
         from engine.tools import Toolchain
-        self.toolchain = Toolchain(workspace_dir)
+        self.toolchain = Toolchain(workspace_dir, approval_gateway=gateway)
 
     def execute_step(self, step, route, context):
         """Execute one step, iterating if tools are used."""
