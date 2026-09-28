@@ -18,7 +18,9 @@ def enable_startup():
     if not python_exe.exists():
         python_exe = Path(sys.executable).parent / "pythonw.exe"
         
-    script_path = current_dir / "app_gui.py"
+    script_path = current_dir / "ui" / "server.py"
+    if not script_path.exists():
+        raise FileNotFoundError(f"Active JARVIS server not found: {script_path}")
 
     # VBScript to launch JARVIS in the background seamlessly on Windows login
     vbs_content = f'''Set WshShell = CreateObject("WScript.Shell")

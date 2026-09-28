@@ -11,7 +11,7 @@ class Executor:
         self.provider_manager = provider_manager
         self.gateway = gateway
         from engine.tools import Toolchain
-        self.toolchain = Toolchain(workspace_dir)
+        self.toolchain = Toolchain(workspace_dir, approval_gateway=gateway)
 
     def execute_step(self, step, route, context):
         """Execute one step, iterating if tools are used."""
@@ -27,11 +27,11 @@ class Executor:
         system = f"You are an expert at {step.step_type}. Be thorough and precise."
         if step.tools_needed:
             system += (
-                "\nYou have access to terminal and python execution.\n"
-                "To run a terminal command, wrap it in a ```bash block.\n"
-                "To run a python script, wrap it in a ```python block.\n"
-                "You can run one or more tools. The system will execute them and return the results. "
-                "Once you have gathered enough information or completed the task, provide your final answer."
+                "\nYou may propose a bounded internal command or pure-code block, but every proposal "
+                "is validated by the sandbox and may be denied. Never assume unrestricted shell, "
+                "network, filesystem, interpreter, or process access. Wrap a command in a ```bash "
+                "block or a pure-code proposal in a ```python block. The system will return a "
+                "controlled result; then provide the final answer."
             )
 
         messages = [
@@ -60,7 +60,7 @@ class Executor:
             self.gateway.log(f"  [Executor] Tools executed. Returning output to model...")
             messages.append({"role": "user", "content": f"Tool execution results:\n{feedback}"})
 
-        return messages[-1]["content"]
+        raise RuntimeError("Tool loop exhausted without a final response")
 
     def _build_prompt(self, step, context):
         """Build execution prompt with context."""

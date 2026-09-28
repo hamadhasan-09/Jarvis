@@ -52,12 +52,16 @@ def chunk_document(document: LoadedDocument, max_chars: int = 1400, overlap: int
 
 def _make_chunk(document: LoadedDocument, text: str, section: str, page: int | None, part: int) -> DocumentChunk:
     normalized = re.sub(r"\s+", " ", text).strip()
-    digest = hashlib.sha256(f"{document.source}|{section}|{page}|{part}|{normalized}".encode("utf-8")).hexdigest()
+    document_id = hashlib.sha256(str(document.source).encode("utf-8")).hexdigest()[:32]
+    document_version = hashlib.sha256(document.text.encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(f"{document_id}|{document_version}|{section}|{page}|{part}|{normalized}".encode("utf-8")).hexdigest()
     return DocumentChunk(
         chunk_id=digest,
         text=normalized,
         metadata={
             "source": document.source,
+            "document_id": document_id,
+            "document_version": document_version,
             "file_path": document.path,
             "file_name": document.file_name,
             "title": document.title,

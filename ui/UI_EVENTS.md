@@ -1,111 +1,65 @@
-# JARVIS UI Event Integration Documentation
+# JARVIS UI event adapter contract
 
-This document outlines the Socket.IO events that the UI consumes and emits. The Application/UI layer acts entirely as a presentation and state-tracking layer. It relies on the backend to enforce safety, sandboxing, and execution.
+`ui/index.html` is the visual shell and `/ui/hud/session.js` is the single frontend composition entry point. The modules under `ui/hud/` own presentation state, voice/TTS interfaces, transport, conversation state, accessibility, and cleanup. The frontend does not make safety, routing, memory, retrieval, or approval-policy decisions.
 
-## Events Consumed by UI (Server -> Client)
+See `ui/hud/ARCHITECTURE.md` for the responsibility map and lifecycle boundary.
 
-### `approval_request`
-Sent by the backend when an autonomous action requires human confirmation.
-**Payload:**
-```json
-{
-  "id": "uuid-string",
-  "action_type": "str (e.g. 'File Edit', 'Shell Command')",
-  "context": "str (Brief context or reason)",
-  "prompt_text": "str (Detailed explanation of what JARVIS wants to do)",
-  "risk_level": "str ('high' | 'medium' | 'low')",
-  "target": "str (Target file, path, or command)"
-}
-```
-**UI Behavior:** Changes state to `waiting_confirmation`, displays the authorization modal.
-
-### `status`
-Sent by the backend to transition the UI visual state.
-**Payload:**
-```json
-{
-  "state": "str ('thinking' | 'retrieving' | 'searching' | 'verifying' | 'executing' | 'waiting_confirmation' | 'completed' | 'cancelled' | 'failed' | 'error')",
-  "message": "str (Optional status text)",
-  "request_id": "str (Optional correlation ID)",
-  "task_type": "str"
-}
-```
-**UI Behavior:** Maps the state to visual animations on the HUD core and updates status labels.
-
-### `jarvis_reply_token`
-Sent during a streaming response.
-**Payload:**
-```json
-{
-  "token": "str",
-  "is_first": "bool"
-}
-```
-**UI Behavior:** Appends the token to the live speech display.
-
-### `jarvis_reply`
-Sent when a response is fully completed.
-**Payload:**
-```json
-{
-  "text": "str (Full spoken text)",
-  "memory_saved": "bool",
-  "request_id": "str",
-  "provider": "str",
-  "model": "str",
-  "fallback_used": "bool",
-  "task_type": "str",
-  "retrieval_active": "bool",
-  "web_retrieval_active": "bool",
-  "sources": "list",
-  "verification": "dict"
-}
-```
-**UI Behavior:** Synthesizes the text to voice, resets the core to `idle`, and updates history details.
+## Server -> browser
 
 ### `system_status`
-Sent upon initial connection.
-**Payload:**
+
+Initial diagnostics: `status`, `model`, `provider`, `memory`, `knowledge`, `web`, and `verification_enabled`.
+
+### `status`
+
+Lifecycle payload:
+
 ```json
-{
-  "status": "str",
-  "model": "str",
-  "memory": "dict",
-  "knowledge": "dict",
-  "web": "dict",
-  "verification_enabled": "bool"
-}
+{"state":"thinking|retrieving|generating|verifying|executing|waiting_confirmation|approved|completed|cancelled|failed|error","message":"optional","request_id":"id","task_id":"id","task_type":"GENERAL"}
 ```
-**UI Behavior:** Populates diagnostic overlays.
 
-### `metrics` / `memory_stats` / `memory_action`
-System and memory usage data.
-**UI Behavior:** Updates the runtime data overlay.
+The browser uses this only to choose the visual state.
 
----
+### `approval_request`
 
-## Events Emitted by UI (Client -> Server)
-
-### `approval_response`
-Sent in response to an `approval_request`.
-**Payload:**
 ```json
-{
-  "id": "uuid-string (Must match request ID)",
-  "result": "bool (true for Approve, false for Deny/Cancel)"
-}
+{"id":"approval-id","task_id":"task-id","action_type":"create_file","context":{},"prompt_text":"preview","risk_level":"medium","target":"target","reason":"reason"}
 ```
+
+The browser displays the modal and sends a response. Approval is targeted by the backend to the originating Socket.IO client; the browser must not assume a broadcast.
+
+### `jarvis_reply_token`
+
+```json
+{"token":"partial text","is_first":true,"reset":false,"request_id":"id","task_id":"id"}
+```
+
+Tokens are appended only when their `request_id` matches the active stream. When `reset` is true, the browser clears the current buffer before accepting fallback tokens.
+
+### `jarvis_reply`
+
+The final response includes `text`, `request_id`, `provider`, `model`, `fallback_used`, `task_type`, retrieval flags, `sources`, and `verification`. The browser speaks only the final `text`; it does not infer provider or approval policy.
+
+## Browser -> server
 
 ### `user_speech`
-Sent when the frontend speech recognition completes a command.
-**Payload:**
+
 ```json
-{
-  "text": "str",
-  "request_id": "str",
-  "language_hint": "str"
-}
+{"text":"voice transcript","request_id":"optional-id","language_hint":"optional"}
 ```
 
-### `get_metrics` / `get_memory_stats` / `forget_memory`
-Diagnostic and memory-management requests.
+The backend redacts secrets before persistence, provider calls, or external retrieval.
+
+### `approval_response`
+
+```json
+{"id":"approval-id","task_id":"task-id","result":true}
+```
+
+`result` must be a real JSON boolean. The browser sends `task_id` from the pending request and clears it after one response. Strings such as `"false"` are not valid approvals.
+
+### Diagnostics and memory
+
+`get_metrics`, `get_memory_stats`, and `forget_memory` are diagnostic or explicit memory-management events. Memory deletion confirmation must also be a real boolean.
+
+See `backend/event_contract.md` for backend ownership, risk levels, timeout behavior, reset semantics, and privacy rules.

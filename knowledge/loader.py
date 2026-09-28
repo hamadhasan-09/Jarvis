@@ -37,7 +37,12 @@ def load_path(path: str | Path) -> tuple[list[LoadedDocument], list[dict[str, st
     files = [target] if target.is_file() else sorted(item for item in target.rglob("*") if item.is_file())
     documents: list[LoadedDocument] = []
     for file_path in files:
-        if _is_blocked(file_path):
+        try:
+            relative = file_path.relative_to(target if target.is_dir() else file_path.parent)
+        except ValueError:
+            relative = Path(file_path.name)
+        hidden_relative = any(part.startswith(".") for part in relative.parts)
+        if hidden_relative or _is_blocked(file_path):
             errors.append({"path": str(file_path), "error": "sensitive or hidden file skipped"})
             continue
         if file_path.suffix.lower() not in SUPPORTED_SUFFIXES:
@@ -118,4 +123,4 @@ def _is_blocked(path: Path) -> bool:
         return True
     if path.suffix.lower() in {".pem", ".key", ".p12", ".pfx", ".crt"}:
         return True
-    return any(part.startswith(".") and part not in {".", ".."} for part in path.parts if part == path.name or part.startswith("."))
+    return path.name.startswith(".")

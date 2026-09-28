@@ -1,73 +1,60 @@
-"""
-Verification Engine
-Checks work quality using adversarial review
-"""
+"""Fail-closed verification for autonomous work."""
+
+from __future__ import annotations
 
 import re
 
 
 class Verifier:
-    """Verifies task outputs."""
+    """Verify step outputs and objective completeness without treating errors as success."""
 
     def __init__(self, provider_manager, task_router):
         self.provider_manager = provider_manager
         self.task_router = task_router
 
     def verify_step(self, step, result):
-        """Verify a step's output."""
         if not result or len(str(result).strip()) < 10:
-            return {"passed": False, "confidence": 0, "reason": "Empty output"}
-
+            return {"passed": False, "confidence": 0.0, "reason": "Empty output"}
         try:
             from llm.task_router import TaskRequest, VERIFICATION
             task = TaskRequest(text="verify", task_type=VERIFICATION)
             route = self.task_router.route(task)
-
-            prompt = f"""Critically review this output.
-
-TASK: {step.description}
-OUTPUT:
-{str(result)[:3000]}
-
-CRITERIA:
-{chr(10).join(f'- {c}' for c in (step.verification_criteria or ['Output is relevant and complete']))}
-
-Rate:
-1. Is it factually correct?
-2. Is it complete?
-3. Are there errors?
-4. Quality 1-10?
-5. VERDICT: PASS or FAIL
-6. CONFIDENCE: 0.0 to 1.0"""
-
-            response = self.provider_manager.generate(
-                route,
-                [{"role": "user", "content": prompt}],
-                temperature=0.2
+            criteria = step.verification_criteria or ["Output is relevant and complete"]
+            prompt = (
+                "Critically review the output below. Return exactly these fields on separate lines:\n"
+                "VERDICT: PASS or FAIL\nCONFIDENCE: a number from 0.0 to 1.0\nREASON: brief reason\n\n"
+                f"TASK: {step.description}\nOUTPUT:\n{str(result)[:3000]}\n\n"
+                "CRITERIA:\n" + "\n".join(f"- {item}" for item in criteria)
             )
-            review = response.text
-
-            passed = "PASS" in review.upper() and "FAIL" not in review.upper()
-            conf_match = re.search(r'CONFIDENCE:\s*([\d.]+)', review)
-            confidence = float(conf_match.group(1)) if conf_match else (0.7 if passed else 0.3)
-
-            return {
-                "passed": passed,
-                "confidence": confidence,
-                "reason": review[:200]
-            }
-
-        except Exception as e:
-            return {"passed": True, "confidence": 0.4, "reason": f"Verification error: {e}"}
+            response = self.provider_manager.generate(route, [{"role": "user", "content": prompt}], temperature=0.2)
+            review = str(response.text or "").strip()
+            verdict = re.search(r"^\s*VERDICT\s*:\s*(PASS|FAIL)\b", review, re.IGNORECASE | re.MULTILINE)
+            confidence_match = re.search(r"^\s*CONFIDENCE\s*:\s*(0(?:\.\d+)?|1(?:\.0+)?)\s*$", review, re.IGNORECASE | re.MULTILINE)
+            reason_match = re.search(r"^\s*REASON\s*:\s*(.+)$", review, re.IGNORECASE | re.MULTILINE)
+            if not verdict or not confidence_match or not reason_match:
+                return {"passed": False, "confidence": 0.0, "reason": "Malformed verification response"}
+            confidence = float(confidence_match.group(1))
+            passed = verdict.group(1).upper() == "PASS"
+            return {"passed": bool(passed), "confidence": confidence, "reason": reason_match.group(1).strip()[:300]}
+        except Exception as exc:
+            return {"passed": False, "confidence": 0.0, "reason": f"Verification error: {type(exc).__name__}"}
 
     def verify_objective(self, objective, results):
-        """Verify entire objective."""
-        total = len(results)
-        completed = sum(1 for r in results.values() if r)
-        rate = completed / total if total > 0 else 0
-
+        """Require every planned step and a successful objective state."""
+        plan = getattr(objective, "plan", None)
+        expected = {f"step_{index + 1}" for index, _ in enumerate(getattr(plan, "steps", []) or [])}
+        actual = set(results or {})
+        missing = sorted(expected - actual)
+        status = getattr(objective, "status", None)
+        if getattr(status, "value", None) == "failed":
+            return {"passed": False, "confidence": 0.0, "reason": "Objective is already failed"}
+        if missing:
+            return {"passed": False, "confidence": 0.0, "reason": f"Missing completed steps: {', '.join(missing)}"}
+        total = len(expected) or len(actual)
+        completed = sum(1 for key in actual if results.get(key) not in (None, ""))
+        rate = completed / total if total else 0.0
         return {
-            "passed": rate >= 0.8,
+            "passed": bool(total > 0 and completed == total),
             "confidence": rate,
-            "reason": f"{completed}/{total} steps completed ({rate:.0%})"
+            "reason": f"{completed}/{total} steps completed ({rate:.0%})",
         }

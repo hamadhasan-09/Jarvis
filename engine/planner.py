@@ -6,18 +6,21 @@ Breaks big objectives into executable steps
 import json
 import re
 
+from skills.registry import SkillRegistry
+
 
 class TaskStep:
     """One step in a plan."""
     def __init__(self, name, description, step_type="analyze",
                  tools=None, depends_on=None, output_key="",
                  risk="low", needs_approval=False, criteria=None,
-                 model_pref=""):
+                 model_pref="", input_keys=None):
         self.name = name
         self.description = description
         self.step_type = step_type
         self.tools_needed = tools or []
         self.depends_on = depends_on or []
+        self.input_keys = input_keys or []
         self.output_key = output_key or name.lower().replace(" ", "_")
         self.risk_level = risk
         self.requires_human_approval = needs_approval
@@ -31,6 +34,7 @@ class Plan:
         self.objective = objective
         self.steps = []
         self.context = {}
+        self.skills = []
 
     def to_string(self):
         output = f"\n📋 PLAN: {self.objective}\n{'='*50}\n"
@@ -50,6 +54,7 @@ class Planner:
     def __init__(self, provider_manager, task_router):
         self.provider_manager = provider_manager
         self.task_router = task_router
+        self.skill_registry = SkillRegistry()
 
     def decompose(self, objective, constraints=None):
         """Break objective into steps using AI."""
@@ -57,6 +62,19 @@ class Planner:
         from llm.task_router import TaskRequest, REASONING
         task = TaskRequest(text=objective, task_type=REASONING)
         route = self.task_router.route(task)
+        skill_context = self.skill_registry.build_context(
+            objective,
+            task_type=task.task_type,
+            limit=3,
+        )
+
+        selected_skills = self.skill_registry.select(
+            objective,
+            task_type=task.task_type,
+            limit=3,
+        )
+
+        selected_skill_names = [skill.name for skill in selected_skills]
 
         # Load relevant SOPs
         sops = ""
@@ -78,9 +96,12 @@ class Planner:
 
 OBJECTIVE: {objective}
 
+RELEVANT JARVIS SKILLS:
+{skill_context}
+
 {sops}
 
-AVAILABLE TOOLS: terminal (bash), python execution (python)
+AVAILABLE TOOLS: bounded internal workspace commands only (list/read/echo/date/time); generated Python, arbitrary processes, shell operators, and network access are disabled by the sandbox
 
 Return JSON:
 {{
@@ -99,7 +120,9 @@ Return JSON:
     ]
 }}
 
-Be thorough. Include verification steps. Mark risky steps for approval."""
+Be thorough. Include verification steps. Mark risky steps for approval.
+
+Treat the provided skills as operating procedures. Use them when relevant, but do not invent tools or permissions."""
 
         try:
             response = self.provider_manager.generate(
@@ -110,6 +133,7 @@ Be thorough. Include verification steps. Mark risky steps for approval."""
             plan_data = self._parse_json(response.text)
 
             plan = Plan(objective)
+            plan.skills = selected_skill_names
             for s in plan_data.get("steps", []):
                 plan.steps.append(TaskStep(
                     name=s.get("name", "Unnamed"),
@@ -121,7 +145,8 @@ Be thorough. Include verification steps. Mark risky steps for approval."""
                     risk=s.get("risk", "low"),
                     needs_approval=s.get("needs_approval", False),
                     criteria=s.get("criteria", []),
-                    model_pref=s.get("model_preference", "")
+                    model_pref=s.get("model_preference", ""),
+                    input_keys=s.get("input_keys", []),
                 ))
 
             return plan

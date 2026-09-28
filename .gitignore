@@ -24,3 +24,25 @@ data/memory_test_*/
 tests/*.log
 workspace/
 checkpoints/
+# --- Added before first real push of local voice work ---
+# Personal runtime data (memory DB, ingested docs) - never commit
+data/
+
+# Local LLM weights - Qalb GGUF is ~4.7GB, GitHub hard-limits files at 100MB
+models/*
+!models/README.md
+
+# Pytest scratch dirs (broken permissions on this machine)
+.pytest*/
+
+# Automated installer/patch backup artifacts
+*.backup
+*-backup
+
+# Editor-specific
+.cursor/
+
+# Live mic-test debug artifacts
+mic_test.wav
+nexus_run.log
+*.log

@@ -1,0 +1,83 @@
+stt:
+  provider: groq
+  groq_model: whisper-large-v3-turbo
+  language: en
+  model: whisper-large-v3-turbo
+  fallback_model: small.en
+  device: groq
+  compute_type: int8
+  fallback_device: cpu
+  fallback_compute_type: int8
+  beam_size: 1
+  vad_filter: true
+  condition_on_previous_text: false
+  temperatures: [0.0]
+  no_speech_threshold: 0.6
+  min_avg_logprob: -1.0
+vad:
+  provider: silero
+  threshold: 0.5
+  min_silence_ms: 700
+  min_speech_ms: 300
+  max_utterance_s: 30
+  preroll_ms: 300
+wakeword:
+  enabled: false
+  model: hey_jarvis
+  threshold: 0.5
+input:
+  mode: always_on
+  device: default
+  native_sample_rate: true
+  target_sample_rate: 16000
+  channels: 1
+barge_in: false
+audio:
+  frame_samples: 512
+  input_queue_size: 128
+  playback_queue_size: 32
+  sentence_silence_ms: 150
+  fade_ms: 5
+  target_peak_dbfs: -1.0
+  output_reference_rate: 24000
+logging:
+  level: INFO
+  file: data/logs/voice.log
+  max_bytes: 5242880
+  backup_count: 4
+tts:
+  enabled: false # STT-first milestone; enable TTS after local transcription is verified.
+  provider: indic_parler
+  model: ai4bharat/indic-parler-tts
+  device: auto
+  minimum_gpu_memory_gb: 3.5
+  seed: 42
+  voices:
+    en: "Mary's voice is clear and natural. She speaks confidently at a moderate pace in a close, very high quality recording with no background noise."
+    ur: "A male speaker speaks Urdu clearly with a calm, warm, professional tone at a moderate pace. Very high quality recording, no background noise."
+brain:
+  qalb:
+    enabled: true
+    mode: hybrid
+    server: llama_cpp
+    base_url: http://127.0.0.1:8081/v1
+    model: Qalb-1.0-8B-Instruct.Q4_K_M.gguf
+    model_path: 'C:\Users\Hammad\Desktop\Nexus\models\qalb\Qalb-1.0-8B-Instruct.Q4_K_M.gguf' # Exact user-provided GGUF; never auto-download or substitute.
+    chat_template: llama3 # GGUF has Llama tokenizer metadata but no embedded tokenizer.chat_template.
+    stop: ["<|eot_id|>", "<|end_of_text|>", "<|start_header_id|>user"]
+    context_tokens: 8192
+    gpu_layers: 6 # Conservative partial offload for the 2 GB Quadro K620.
+    timeout_s: 30
+    auto_start: true
+    executable: 'C:\Users\Hammad\AppData\Local\Microsoft\WinGet\Packages\ggml.llamacpp_Microsoft.Winget.Source_8wekyb3d8bbwe\llama-server.exe'
+    temperature: 0.6
+    top_p: 0.9
+    repeat_penalty: 1.1
+    max_tokens: 400
+    stream: true
+    system_prompt: >-
+      You are JARVIS, a professional personal assistant. Always reply in fluent,
+      natural Urdu written in Urdu script only. Never use Hindi/Devanagari or
+      Roman Urdu. Keep replies short and conversational because they will be
+      spoken aloud. No markdown, lists, emojis, or code. Keep technical English
+      terms where natural. Be polite and professional.

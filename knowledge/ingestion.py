@@ -24,6 +24,15 @@ class KnowledgeBase:
 
     def ingest(self, path: str | Path | None = None, max_chars: int = 1400, overlap: int = 180) -> dict[str, Any]:
         target = Path(path).expanduser() if path else self.documents_dir
+        target = target.resolve()
+        if not target.exists():
+            removed = self.store.delete_sources([str(target)])
+            return {
+                "path": str(target), "documents": 0, "chunks": 0,
+                "removed_chunks": removed, "redacted_documents": 0,
+                "errors": [{"path": str(target), "error": "path does not exist; stale source removed"}],
+                "status": self.status(),
+            }
         documents, errors = load_path(target)
         chunks = []
         redacted = 0
@@ -37,14 +46,20 @@ class KnowledgeBase:
                 for page in document.pages:
                     page["text"] = self.secret_detector.redact(page.get("text", ""))
             chunks.extend(chunk_document(document, max_chars=max_chars, overlap=overlap))
-        inserted = self.store.upsert([
-            {"chunk_id": chunk.chunk_id, "text": chunk.text, "metadata": chunk.metadata}
-            for chunk in chunks
-        ])
+        active_sources = {str(Path(document.source).resolve()) for document in documents}
+        before_count = self.store.count()
+        inserted = self.store.replace_documents(
+            [{"chunk_id": chunk.chunk_id, "text": chunk.text, "metadata": chunk.metadata} for chunk in chunks],
+            scope=target,
+            active_sources=active_sources,
+        )
+        after_count = self.store.count()
+        removed_chunks = max(0, before_count + inserted - after_count)
         return {
-            "path": str(target.resolve()),
+            "path": str(target),
             "documents": len(documents),
             "chunks": inserted,
+            "removed_chunks": removed_chunks,
             "redacted_documents": redacted,
             "errors": errors,
             "status": self.status(),

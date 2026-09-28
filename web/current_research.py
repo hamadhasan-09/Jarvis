@@ -12,6 +12,8 @@ from html.parser import HTMLParser
 import os
 import re
 from typing import Any, Callable
+
+from core.memory_manager import SecretDetector
 from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 
 try:
@@ -108,6 +110,21 @@ def _domain(url: str) -> str:
     return match.group(1).lower() if match else ""
 
 
+def _evidence_tokens(value: str) -> list[str]:
+    stop = {
+        "the", "and", "for", "are", "this", "that", "with", "from", "what", "when", "where", "which", "who", "how", "why", "is", "am", "be", "to", "of", "in", "on", "at", "a", "an", "my", "your", "current", "currently", "today", "latest", "recent", "please", "about", "tell", "me",
+    }
+    aliases = {
+        "sadar": "president", "rashtrapati": "president", "राष्ट्रपति": "president", "صدر": "president",
+        "wazir": "minister", "azam": "prime", "wazir-e-azam": "prime", "وزیراعظم": "prime", "وزیر": "minister",
+        "प्रधानमंत्री": "prime", "मंत्री": "minister", "kon": "who", "kaun": "who", "کون": "who",
+        "mausam": "weather", "موسم": "weather", "मौसम": "weather",
+        "khabar": "news", "خبر": "news", "समाचार": "news",
+    }
+    tokens = re.findall(r"[\w\u0600-\u06FF\u0900-\u097F]{2,}", (value or "").casefold())
+    return [aliases.get(token, token) for token in tokens if token not in stop]
+
+
 def _safe_url(url: str) -> bool:
     if not url.startswith(("http://", "https://")) or re.search(r"[\r\n\x00]", url):
         return False
@@ -118,7 +135,7 @@ def _safe_url(url: str) -> bool:
 def _preferred_domains(query: str) -> set[str]:
     """Return official domains for roles where an authoritative source exists."""
     value = query.lower()
-    if re.search(r"\bpresident\b", value) and re.search(r"\b(united states|u\.s\.?|america|us)\b", value):
+    if re.search(r"\b(president|sadar|rashtrapati)\b", value) and re.search(r"\b(united states|u\.s\.?|america|amerika|us)\b", value):
         return {"whitehouse.gov", "usa.gov", "govinfo.gov"}
     if re.search(r"\bmayor\b", value) and re.search(r"\bnew york( city)?\b", value):
         return {"nyc.gov"}
@@ -130,7 +147,7 @@ def _preferred_domains(query: str) -> set[str]:
 def _direct_official_urls(query: str) -> list[tuple[str, str]]:
     """Return stable official pages for common public-office lookups."""
     value = query.lower()
-    if re.search(r"\bpresident\b", value) and re.search(r"\b(united states|u\.s\.?|america|us)\b", value):
+    if re.search(r"\b(president|sadar|rashtrapati)\b", value) and re.search(r"\b(united states|u\.s\.?|america|amerika|us)\b", value):
         return [
             ("https://www.whitehouse.gov/administration/donald-j-trump/", "The White House president page"),
             ("https://www.usa.gov/presidents", "USAGov presidents page"),
@@ -204,6 +221,7 @@ class WebResearcher:
     def __init__(self, timeout: float | None = None, http_get: Callable[..., Any] | None = None):
         self.timeout = max(2.0, float(timeout or os.getenv("JARVIS_WEB_TIMEOUT", "8")))
         self.http_get = http_get or (requests.get if requests is not None else None)
+        self.secret_detector = SecretDetector()
         self.last_error = ""
 
     @property
@@ -233,7 +251,9 @@ class WebResearcher:
         return results
 
     def search(self, query: str, top_k: int = 5) -> list[WebSource]:
-        query = _clean_text(query)
+        # Redact before any public search request; callers may use this class
+        # directly outside the browser server.
+        query = self.secret_detector.redact(_clean_text(query))
         if not query or not self.available:
             self.last_error = "HTTP search dependency unavailable"
             return []
@@ -281,6 +301,23 @@ class WebResearcher:
         except Exception as exc:
             self.last_error = f"{type(exc).__name__}: {str(exc)[:180]}"
             return []
+
+    def has_relevant_evidence(self, query: str, sources: list[dict[str, str]] | list[WebSource]) -> bool:
+        """Require overlap with the question's meaningful subject terms."""
+        if not sources:
+            return False
+        query_terms = set(_evidence_tokens(query))
+        if not query_terms:
+            return False
+        for item in sources:
+            if isinstance(item, WebSource):
+                text = f"{item.title} {item.snippet} {item.domain}"
+            else:
+                text = " ".join(str(item.get(key, "")) for key in ("title", "snippet", "domain"))
+            source_terms = set(_evidence_tokens(text))
+            if query_terms & source_terms:
+                return True
+        return False
 
     def context(self, query: str, top_k: int = 5, max_chars: int = 5000) -> tuple[str, list[dict[str, str]]]:
         sources = self.search(query, top_k=top_k)

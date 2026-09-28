@@ -280,6 +280,7 @@ class PersistentMemory:
             return []
 
     def search(self, query: str, limit: int = 5, session_id: str | None = None) -> list[str]:
+        query = self.secret_detector.redact(str(query or ""))
         if not query:
             return []
         if self.vector_db:
@@ -500,7 +501,7 @@ class PersistentMemory:
         if recent:
             parts.append("Recent conversation:")
             parts.extend(f"{item['role']}: {item['content'][:450]}" for item in recent)
-        similar = self.search(query, limit=search_limit)
+        similar = self.search(query, limit=search_limit, session_id=session_id)
         if similar:
             parts.append("Relevant past memory:")
             parts.extend(f"- {item[:450]}" for item in similar)
