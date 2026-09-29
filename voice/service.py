@@ -20,7 +20,7 @@ from voice.config import VoiceConfig, load_config
 from voice.logging_config import configure_voice_logging
 from voice.stt import SpeechToText, TranscriptResult, WhisperEngine
 from voice.text_cleaner import split_sentences
-from voice.tts import IndicParlerTTS
+from voice.tts import EdgeTTS
 from voice.vad import SileroVAD
 from voice.wakeword import WakeWord
 
@@ -73,7 +73,7 @@ class VoiceService:
         self.stt = stt if stt is not None else WhisperEngine(self.config)
         # The STT-first milestone does not require a separate speech generator.
         self._tts_enabled = tts is not None or bool(self.config.section("tts").get("enabled", True))
-        self.tts = tts if tts is not None else (IndicParlerTTS(self.config) if self._tts_enabled else None)
+        self.tts = tts if tts is not None else (EdgeTTS(self.config) if self._tts_enabled else None)
         self.audio_output = audio_output or AudioOutput(self.config)
         self.state = VoiceState.IDLE
         self._state_lock = threading.RLock()

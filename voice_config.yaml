@@ -46,15 +46,15 @@ logging:
   max_bytes: 5242880
   backup_count: 4
 tts:
-  enabled: false # STT-first milestone; enable TTS after local transcription is verified.
-  provider: indic_parler
-  model: ai4bharat/indic-parler-tts
-  device: auto
-  minimum_gpu_memory_gb: 3.5
-  seed: 42
+  enabled: true
+  provider: edge_tts
   voices:
-    en: "Mary's voice is clear and natural. She speaks confidently at a moderate pace in a close, very high quality recording with no background noise."
-    ur: "A male speaker speaks Urdu clearly with a calm, warm, professional tone at a moderate pace. Very high quality recording, no background noise."
+    en: en-GB-RyanNeural
+    ur: ur-PK-UzmaNeural
+  elevenlabs:
+    enabled: false
+    voice_id: xWRIcE4FuE8s9387uHX3
+    model_id: eleven_v4_turbo
 brain:
   qalb:
     enabled: true

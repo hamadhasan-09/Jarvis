@@ -21,6 +21,7 @@ class SecureKeyManager:
             "anthropic": "ANTHROPIC_API_KEY",
             "google": "GOOGLE_API_KEY",
             "groq": "GROQ_API_KEY",
+            "elevenlabs": "ELEVENLABS_API_KEY",
             "experiential": "EXPERIENTIAL_API_KEY",
         }
 
