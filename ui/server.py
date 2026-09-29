@@ -1133,56 +1133,6 @@ def auto_open_browser():
     webbrowser.open(url, new=2)
 
 
-def _run_voice_engine(stop_event: threading.Event) -> None:
-    """Run the additive voice engine on its own asyncio loop/thread."""
-    import asyncio
-
-    try:
-        from voice_engine.engine import VoiceEngine
-    except Exception as exc:
-        print(f"[VOICE ENGINE] Import failed: {type(exc).__name__}: {exc}", flush=True)
-        return
-
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        engine = VoiceEngine(
-            session_id=VOICE_ENGINE_SESSION_ID,
-            socket_url=f"http://{JARVIS_HOST}:{JARVIS_PORT}",
-            on_state=lambda state, details: print(
-                f"[VOICE ENGINE] state={getattr(state, 'value', state)} details={details}",
-                flush=True,
-            ),
-            on_metrics=lambda metrics: print(
-                f"[VOICE ENGINE] metrics={metrics.to_dict()}",
-                flush=True,
-            ),
-        )
-    except Exception as exc:
-        print(f"[VOICE ENGINE] Construction failed: {type(exc).__name__}: {exc}", flush=True)
-        loop.close()
-        return
-    started = False
-    try:
-        while not stop_event.is_set():
-            try:
-                loop.run_until_complete(engine.start())
-                started = True
-                break
-            except Exception as exc:
-                print(f"[VOICE ENGINE] Start retry: {type(exc).__name__}: {exc}", flush=True)
-                loop.run_until_complete(asyncio.sleep(1.0))
-        while started and not stop_event.is_set():
-            loop.run_until_complete(asyncio.sleep(0.25))
-    finally:
-        if started:
-            try:
-                loop.run_until_complete(engine.stop())
-            except Exception as exc:
-                print(f"[VOICE ENGINE] Shutdown error: {type(exc).__name__}: {exc}", flush=True)
-        loop.close()
-
-
 if __name__ == "__main__":
     local_voice = None
     voice_brain_bridge = None

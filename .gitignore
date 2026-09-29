@@ -46,3 +46,4 @@ models/*
 mic_test.wav
 nexus_run.log
 *.log
+test_*.mp3
