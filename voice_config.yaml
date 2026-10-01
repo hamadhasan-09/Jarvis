@@ -3,7 +3,8 @@ stt:
   groq_model: whisper-large-v3-turbo
   language: en
   model: whisper-large-v3-turbo
-  fallback_model: small.en
+  fallback_model: base.en
+  vocabulary_hint: ""
   device: groq
   compute_type: int8
   fallback_device: cpu
@@ -31,6 +32,7 @@ input:
   native_sample_rate: true
   target_sample_rate: 16000
   channels: 1
+  gain: 1.0
 barge_in: false
 audio:
   frame_samples: 512

@@ -29,6 +29,7 @@ class AudioInput:
         self.target_rate = int(self.settings.get("target_sample_rate", 16000))
         self.native_rate = self.target_rate
         self.channels = int(self.settings.get("channels", 1))
+        self.gain = float(self.settings.get("gain", 1.0))
         self.frame_samples = int(self.config.section("audio").get("frame_samples", 512))
         self.device = self.settings.get("device", "default")
         self._stop = threading.Event()
@@ -87,6 +88,8 @@ class AudioInput:
                 else:
                     raw = stream(native_block)
                 values = np.asarray(raw, dtype=np.float32)
+                if self.gain != 1.0:
+                    values = np.clip(values * self.gain, -1.0, 1.0)
                 level_values = values.reshape(-1)
                 frames_read += 1
                 peak_window = max(peak_window, float(np.max(np.abs(level_values))) if level_values.size else 0.0)

@@ -59,7 +59,8 @@ class WhisperEngine:
         self._groq_client = groq_client
         self._device = "cpu"
         self.primary_model_name = str(self.settings.get("groq_model", "whisper-large-v3-turbo"))
-        self.fallback_model_name = str(self.settings.get("fallback_model", "small.en"))
+        self.fallback_model_name = str(self.settings.get("fallback_model", "base.en"))
+        self.vocabulary_hint = str(self.settings.get("vocabulary_hint", "")).strip()
         self._model_name = self.fallback_model_name
         self.runtime_reason = "Groq primary; local fallback not loaded"
 
@@ -124,7 +125,18 @@ class WhisperEngine:
         language = str(self.settings.get("language", "en")).strip().lower()
         if language and language != "auto":
             options["language"] = language
-        response = self._get_groq_client().audio.transcriptions.create(**options)
+        if self.vocabulary_hint:
+            options["prompt"] = self.vocabulary_hint
+        client = self._get_groq_client()
+        try:
+            response = client.audio.transcriptions.create(**options)
+        except Exception:
+            if "prompt" not in options:
+                raise
+            retry_options = dict(options)
+            retry_options.pop("prompt")
+            LOG.warning("Groq STT request with vocabulary prompt failed; retrying once without prompt")
+            response = client.audio.transcriptions.create(**retry_options)
         text = re.sub(r"\s+", " ", str(getattr(response, "text", "") or "")).strip()
         if not text:
             return None
@@ -161,7 +173,7 @@ class WhisperEngine:
     def _transcribe_local(self, values: np.ndarray, started: float) -> TranscriptResult | None:
         self._load_fallback()
         try:
-            segments, info = self._run(values, language="en")
+            segments, info = self._run(values, language="en", initial_prompt=self.vocabulary_hint or None)
         except Exception as exc:
             raise RuntimeError(f"Groq and local faster-whisper transcription failed: {exc}") from exc
         result = self._result_from_segments(segments, "en", info, 16000, started)

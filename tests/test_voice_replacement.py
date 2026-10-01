@@ -41,7 +41,7 @@ def test_voice_config_defaults_and_pending_qalb_path():
     assert stt["groq_model"] == "whisper-large-v3-turbo"
     assert stt["language"] == "en"
     assert stt["model"] == "whisper-large-v3-turbo"
-    assert stt["fallback_model"] == "small.en"
+    assert stt["fallback_model"] == "base.en"
     assert stt["fallback_device"] == "cpu"
     assert stt["fallback_compute_type"] == "int8"
     assert config.section("brain")["qalb"]["mode"] == "hybrid"
@@ -321,7 +321,7 @@ def test_voice_service_uses_groq_primary_and_small_en_fallback_by_default():
     )
     assert isinstance(service.stt, WhisperEngine)
     assert service.stt.primary_model_name == "whisper-large-v3-turbo"
-    assert service.stt.fallback_model_name == "small.en"
+    assert service.stt.fallback_model_name == "base.en"
 def test_fast_voice_default_and_claude_reasoning_routes_are_separate(monkeypatch):
     monkeypatch.setenv("JARVIS_PRIMARY_PROVIDER", "groq")
     monkeypatch.setenv("JARVIS_PRIMARY_MODEL", "openai/gpt-oss-20b")
@@ -420,9 +420,9 @@ def test_groq_exception_uses_small_en_cpu_int8_fallback(caplog):
     stt = WhisperEngine(load_config(), groq_client=_fake_groq_client(transcriptions), model_factory=model_factory)
     result = stt.transcribe(np.full(16000, 0.02, dtype=np.float32))
     assert result.text == "Local fallback works."
-    assert created == [("small.en", "cpu", "int8")]
+    assert created == [("base.en", "cpu", "int8")]
     assert "Groq STT failed (OSError)" in caplog.text
-    assert "provider=faster-whisper model=small.en device=cpu compute_type=int8" in caplog.text
+    assert "provider=faster-whisper model=base.en device=cpu compute_type=int8" in caplog.text
 
 
 def test_empty_groq_transcript_does_not_load_local_fallback():
