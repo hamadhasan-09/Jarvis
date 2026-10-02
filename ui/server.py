@@ -871,6 +871,10 @@ def on_user_speech(data):
     task_language_hint = "ur" if speech_language == "ur" else language_hint
     task = task_router.classify(user_text, task_language_hint)
 
+    if task.task_type == "SYSTEM_ACTION" and local_voice_request:
+        task.task_type = "GENERAL"
+        task.route_reason = "system-action intent downgraded for local voice (no approval surface available)"
+
     if task.task_type == "SYSTEM_ACTION":
         route_emit("status", {"state": "executing", "request_id": request_id, "task_type": "SYSTEM_ACTION"})
         route_emit("jarvis_reply_token", {"token": "Initiating autonomous action... ", "is_first": True, "request_id": request_id, "task_id": request_id})
