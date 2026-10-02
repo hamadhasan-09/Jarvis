@@ -250,6 +250,8 @@ class VoiceService:
                 if self._speaking.is_set() and bool(self.config.values.get("barge_in", False)):
                     if self.vad.probability(samples) > float(settings.get("threshold", 0.5)):
                         self.interrupt()
+                    else:
+                        continue
                 if input_mode == "push_to_talk" and not self._ptt_active.is_set():
                     continue
                 if input_mode == "wake_word" and not armed:
