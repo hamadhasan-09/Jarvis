@@ -4,11 +4,14 @@ import os
 import queue
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from typing import Any
 
 from core.runtime_config import env_bool_or_config, env_or_config, load_runtime_config
 from core.memory_manager import SecretDetector
 from security_v2.key_manager import SecureKeyManager
+from security_v2.broker import SecurityBroker
 
 from .anthropic_provider import AnthropicProvider
 from .base_provider import ProviderError, ProviderResponse, sanitize_error
@@ -20,10 +23,20 @@ from .experiential_provider import ExperientialProvider
 class ProviderManager:
     """Keep provider details out of the HUD with bounded, isolated calls."""
 
-    def __init__(self, project_root=None):
+    def __init__(self, project_root=None, broker: SecurityBroker | None = None):
         self.project_root = project_root
         self.config = load_runtime_config(project_root)
-        self.keys = SecureKeyManager()
+        if broker is None:
+            self.keys = SecureKeyManager()
+            audit_root = Path(project_root).resolve() if project_root else Path.cwd()
+            broker = SecurityBroker(
+                gateway=None,
+                key_manager=self.keys,
+                audit_log_path=audit_root / "data" / "logs" / "permission_audit.jsonl",
+            )
+        else:
+            self.keys = getattr(broker, "key_manager", None)
+        self.broker = broker
         self.secret_detector = SecretDetector()
         self.timeout = max(1.0, float(env_or_config(self.config, "JARVIS_PROVIDER_TIMEOUT", ("providers", "timeout_seconds"), "18")))
         self._lock = threading.RLock()
@@ -34,8 +47,21 @@ class ProviderManager:
     def _build_configured_providers(self) -> None:
         primary_model = str(env_or_config(self.config, "JARVIS_PRIMARY_MODEL", ("providers", "primary_model"), os.getenv("JARVIS_MODEL", "openai/gpt-oss-120b")))
         fallback_model = str(env_or_config(self.config, "JARVIS_FALLBACK_MODEL", ("providers", "fallback_model"), "openai/gpt-oss-20b"))
-        groq_models = {primary_model, fallback_model, os.getenv("JARVIS_REASONING_MODEL", ""), os.getenv("JARVIS_CODING_MODEL", ""), os.getenv("JARVIS_VERIFICATION_MODEL", "")}
-        groq_key = self.keys.get_key("groq")
+        ensemble_models = os.getenv(
+            "JARVIS_ENSEMBLE_MODELS",
+            "openai/gpt-oss-120b,llama-3.3-70b-versatile,qwen/qwen3-32b",
+        ).split(",")
+        ensemble_synth_model = os.getenv("JARVIS_ENSEMBLE_SYNTH_MODEL", "openai/gpt-oss-20b")
+        groq_models = {
+            primary_model,
+            fallback_model,
+            os.getenv("JARVIS_REASONING_MODEL", ""),
+            os.getenv("JARVIS_CODING_MODEL", ""),
+            os.getenv("JARVIS_VERIFICATION_MODEL", ""),
+            *ensemble_models,
+            ensemble_synth_model,
+        }
+        groq_key = self.broker.get_credential("groq", purpose="llm_provider_init")
         for model in {item.strip() for item in groq_models if item and item.strip()}:
             provider = GroqProvider(groq_key, model, timeout=self.timeout)
             if provider.is_configured:
@@ -43,13 +69,13 @@ class ProviderManager:
 
         if env_bool_or_config(self.config, "JARVIS_ENABLE_GEMINI", ("providers", "enable_gemini"), False):
             model = os.getenv("JARVIS_GEMINI_MODEL", "gemini-2.0-flash").strip()
-            provider = GeminiProvider(self.keys.get_key("google"), model, timeout=self.timeout)
+            provider = GeminiProvider(self.broker.get_credential("google", purpose="llm_provider_init"), model, timeout=self.timeout)
             if provider.is_configured:
                 self.providers[("gemini", model)] = provider
 
         if env_bool_or_config(self.config, "JARVIS_ENABLE_ANTHROPIC", ("providers", "enable_anthropic"), False):
             model = os.getenv("JARVIS_ANTHROPIC_MODEL", "claude-3-5-haiku-latest").strip()
-            provider = AnthropicProvider(self.keys.get_key("anthropic"), model, timeout=self.timeout)
+            provider = AnthropicProvider(self.broker.get_credential("anthropic", purpose="llm_provider_init"), model, timeout=self.timeout)
             if provider.is_configured:
                 self.providers[("anthropic", model)] = provider
 
@@ -74,7 +100,7 @@ class ProviderManager:
                 "EXPERIENTIAL_BASE_URL",
                 "https://api.experientiallabs.ai/v1",
             ).strip()
-            key = self.keys.get_key("experiential")
+            key = self.broker.get_credential("experiential", purpose="llm_provider_init")
             for model in {item for item in models if item}:
                 provider = ExperientialProvider(
                     key,
@@ -126,6 +152,96 @@ class ProviderManager:
                 errors.append(f"{provider_name} {safe[:180]}")
                 self.last_error = safe
         raise ProviderError("provider_manager", "; ".join(errors) or "no configured provider")
+
+    def generate_ensemble(self, route, messages, temperature=0.65, max_tokens=700, timeout=None, metadata=None) -> ProviderResponse:
+        """Generate independent candidates concurrently, then synthesize one answer."""
+        model_names = [
+            item.strip()
+            for item in os.getenv(
+                "JARVIS_ENSEMBLE_MODELS",
+                "openai/gpt-oss-120b,llama-3.3-70b-versatile,qwen/qwen3-32b",
+            ).split(",")
+            if item.strip()
+        ]
+        synth_model = os.getenv("JARVIS_ENSEMBLE_SYNTH_MODEL", "openai/gpt-oss-20b").strip()
+        call_timeout = max(1.0, float(timeout or self.timeout))
+        safe_messages = self._redact_messages(messages)
+        available = []
+        for model in model_names:
+            provider = self._get_provider("groq", model)
+            if provider is not None and getattr(provider, "model", model) == model and getattr(provider, "is_configured", True):
+                available.append((model, provider))
+        successes: list[tuple[str, ProviderResponse]] = []
+
+        def call_candidate(model, provider):
+            return self._call_with_deadline(
+                lambda: provider.generate(
+                    messages=safe_messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    timeout=call_timeout,
+                    metadata=metadata,
+                ),
+                call_timeout,
+                f"ensemble-{model}",
+            )
+
+        if available:
+            with ThreadPoolExecutor(max_workers=len(available), thread_name_prefix="jarvis-ensemble") as executor:
+                futures = {
+                    executor.submit(call_candidate, model, provider): model
+                    for model, provider in available
+                }
+                for future in as_completed(futures):
+                    model = futures[future]
+                    try:
+                        successes.append((model, future.result()))
+                    except Exception as exc:
+                        print(f"[ENSEMBLE] Candidate {model} failed: {sanitize_error(type(exc).__name__ + ': ' + str(exc))}")
+
+        if not successes:
+            raise ProviderError("ensemble", "no ensemble candidates returned a response")
+        if len(successes) == 1:
+            response = successes[0][1]
+            response.metadata["ensemble_members"] = 1
+            return response
+
+        last_user_index = next(
+            (index for index in range(len(safe_messages) - 1, -1, -1) if safe_messages[index].get("role") == "user"),
+            None,
+        )
+        if last_user_index is None:
+            raise ProviderError("ensemble", "conversation has no user message to synthesize")
+        original_question = str(safe_messages[last_user_index].get("content", ""))
+        candidate_text = "\n\n".join(
+            f"Candidate {index}:\n{response.text}"
+            for index, (_, response) in enumerate(successes, start=1)
+        )
+        synthesis_prompt = (
+            f"Original user question:\n{original_question}\n\n{candidate_text}\n\n"
+            "Cross-check the candidates against each other. Resolve any factual disagreements explicitly by stating which is correct and why if they conflict. "
+            "Produce ONE single best final answer in the same voice and style as the rest of the conversation: short, natural, and with no markdown."
+        )
+        synthesis_messages = [dict(item) for item in safe_messages]
+        synthesis_messages[last_user_index] = {"role": "user", "content": synthesis_prompt}
+        synth_provider = self._get_provider("groq", synth_model)
+        if synth_provider is None or getattr(synth_provider, "model", synth_model) != synth_model or not getattr(synth_provider, "is_configured", True):
+            raise ProviderError("ensemble", f"synthesis model {synth_model} is unavailable")
+        response = self._call_with_deadline(
+            lambda: synth_provider.generate(
+                messages=synthesis_messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                timeout=call_timeout,
+                metadata=metadata,
+            ),
+            call_timeout,
+            f"ensemble-synthesis-{synth_model}",
+        )
+        response.metadata["ensemble"] = True
+        response.metadata["ensemble_members"] = len(successes)
+        response.metadata["ensemble_models"] = [model for model, _ in successes]
+        return response
 
     def stream_generate(self, route, messages, temperature=0.65, max_tokens=600, timeout=None, metadata=None):
         """Yield isolated stream chunks and a terminal sentinel.
