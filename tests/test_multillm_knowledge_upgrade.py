@@ -221,9 +221,15 @@ def test_optional_providers_disabled():
 def test_empty_web_result_policy():
     import ui.server as server
 
+    original_memory = server.memory
+    original_knowledge = server.knowledge
+    original_knowledge_enabled = server.KNOWLEDGE_ENABLED
+    original_web_enabled = server.WEB_ENABLED
     root = fresh_root()
-    server.memory = PersistentMemory(project_root=root)
-    server.knowledge = KnowledgeBase(root)
+    test_memory = PersistentMemory(project_root=root)
+    test_knowledge = KnowledgeBase(root)
+    server.memory = test_memory
+    server.knowledge = test_knowledge
     server.KNOWLEDGE_ENABLED = True
     server.WEB_ENABLED = True
     original_web_research = server.web_research
@@ -259,6 +265,7 @@ def test_empty_web_result_policy():
 
     server.provider_manager.generate = fake_generate
     server.provider_manager.stream_generate = fake_stream_generate
+    socket_client = None
     try:
         socket_client = server.socketio.test_client(server.app)
         socket_client.emit("user_speech", {"text": "search the web for who invented electricity", "request_id": "ordinary"})
@@ -272,10 +279,16 @@ def test_empty_web_result_policy():
         assert len(captured) == 1
         socket_client.disconnect()
     finally:
+        if socket_client is not None and socket_client.is_connected():
+            socket_client.disconnect()
         server.provider_manager.generate = original_generate
         server.provider_manager.stream_generate = original_stream_generate
-        server.memory.close()
-        server.knowledge.close()
+        test_memory.close()
+        test_knowledge.close()
+        server.memory = original_memory
+        server.knowledge = original_knowledge
+        server.KNOWLEDGE_ENABLED = original_knowledge_enabled
+        server.WEB_ENABLED = original_web_enabled
         server.web_research = original_web_research
         shutil.rmtree(TEST_ROOT, ignore_errors=True)
 
@@ -283,9 +296,18 @@ def test_empty_web_result_policy():
 def test_live_http_and_socket_route():
     import ui.server as server
 
+    original_memory = server.memory
+    original_knowledge = server.knowledge
+    original_knowledge_enabled = server.KNOWLEDGE_ENABLED
+    original_web_enabled = server.WEB_ENABLED
+    original_verification_enabled = server.task_router.verification_enabled
+    original_verify = server.provider_manager.verify
+    original_generate = server.provider_manager.generate
     root = fresh_root()
-    server.memory = PersistentMemory(project_root=root)
-    server.knowledge = KnowledgeBase(root)
+    test_memory = PersistentMemory(project_root=root)
+    test_knowledge = KnowledgeBase(root)
+    server.memory = test_memory
+    server.knowledge = test_knowledge
     server.KNOWLEDGE_ENABLED = True
     server.WEB_ENABLED = True
     server.task_router.verification_enabled = False
@@ -331,6 +353,7 @@ def test_live_http_and_socket_route():
     server.provider_manager.verify = lambda *args, **kwargs: {
         "performed": False, "passed": None, "provider": None, "model": None, "reason": "disabled"
     }
+    socket_client = None
 
     docs = root / "data" / "knowledge" / "documents"
     docs.mkdir(parents=True, exist_ok=True)
@@ -390,9 +413,18 @@ def test_live_http_and_socket_route():
         assert "not contain enough information" in insufficient["text"]
         socket_client.disconnect()
     finally:
+        if socket_client is not None and socket_client.is_connected():
+            socket_client.disconnect()
+        server.provider_manager.generate = original_generate
         server.provider_manager.stream_generate = original_stream_generate
-        server.memory.close()
-        server.knowledge.close()
+        server.provider_manager.verify = original_verify
+        test_memory.close()
+        test_knowledge.close()
+        server.memory = original_memory
+        server.knowledge = original_knowledge
+        server.KNOWLEDGE_ENABLED = original_knowledge_enabled
+        server.WEB_ENABLED = original_web_enabled
+        server.task_router.verification_enabled = original_verification_enabled
         server.web_research = original_web_research
         shutil.rmtree(TEST_ROOT, ignore_errors=True)
 
