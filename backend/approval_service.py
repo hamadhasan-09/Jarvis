@@ -32,9 +32,19 @@ class BrowserApprovalGateway:
         self._local = threading.local()
 
     @contextmanager
-    def scoped(self, client_id: str | None = None, task_id: str | None = None):
+    def scoped(
+        self,
+        client_id: str | None = None,
+        task_id: str | None = None,
+        *,
+        on_approval_state=None,
+    ):
         previous = getattr(self._local, "scope", None)
-        self._local.scope = {"client_id": client_id, "task_id": task_id}
+        self._local.scope = {
+            "client_id": client_id,
+            "task_id": task_id,
+            "on_approval_state": on_approval_state,
+        }
         try:
             yield self
         finally:
@@ -89,11 +99,30 @@ class BrowserApprovalGateway:
             "target": self.secret_detector.redact(str(kwargs.get("target", context.get("target", "local workspace"))))[:300],
             "reason": assessment["reason"],
         }
+        scope = getattr(self._local, "scope", None) or {}
+        state_callback = scope.get("on_approval_state")
+        if state_callback:
+            try:
+                state_callback("awaiting_approval")
+            except Exception as exc:
+                with self.lock:
+                    self.pending.pop(approval_id, None)
+                self.log(f"Approval state could not be persisted for {action_type}: {type(exc).__name__}")
+                return False
         self._emit("status", {"state": "waiting_confirmation", "message": f"Action approval required: {action_type}", "request_id": approval_id, "task_id": task_id}, client_id)
         self._emit("approval_request", payload, client_id)
         self.log(f"Approval requested: {action_type} [{risk_level}]")
 
-        completed = event.wait(self.timeout_seconds)
+        state_callback_failed = False
+        try:
+            completed = event.wait(self.timeout_seconds)
+        finally:
+            if state_callback:
+                try:
+                    state_callback("running")
+                except Exception as exc:
+                    state_callback_failed = True
+                    self.log(f"Approval state could not be restored for {action_type}: {type(exc).__name__}")
         with self.lock:
             record = self.pending.pop(approval_id, None)
         approved = bool(
@@ -102,6 +131,7 @@ class BrowserApprovalGateway:
             and time.monotonic() <= float(record.get("expires_at", 0))
             and record.get("result") is True
             and record.get("client_id") == client_id
+            and not state_callback_failed
         )
         self._emit(
             "status",
