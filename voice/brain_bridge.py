@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from dataclasses import dataclass
 import logging
 import queue
 import re
@@ -15,6 +16,59 @@ import socketio
 
 LOG = logging.getLogger("jarvis.voice.brain")
 _END = object()
+
+
+@dataclass(frozen=True)
+class ReplySentence:
+    request_id: str
+    text: str
+
+
+class ReplyStream:
+    """Cancelable sentence iterator for the local voice client."""
+
+    def __init__(self, bridge: "VoiceBrainBridge", request_id: str, state: dict[str, Any]):
+        self.bridge = bridge
+        self.request_id = request_id
+        self.state = state
+        self._closed = False
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        while True:
+            item = self.state["queue"].get()
+            if item is _END:
+                self._closed = True
+                with self.bridge._lock:
+                    self.bridge._requests.pop(self.request_id, None)
+                raise StopIteration
+            if isinstance(item, Exception):
+                LOG.warning("Voice brain request failed: %s", type(item).__name__)
+                continue
+            if isinstance(item, dict) and item.get("reset"):
+                return item
+            return ReplySentence(self.request_id, str(item))
+
+    def cancel(self, heard_text: str) -> None:
+        if self._closed or self.state["cancelled"].is_set():
+            return
+        self.state["cancelled"].set()
+        try:
+            self.bridge.socket.emit(
+                "voice_cancel",
+                {"request_id": self.request_id, "heard_text": str(heard_text or "")},
+            )
+        except Exception:
+            LOG.exception("Could not send voice interruption to the brain server")
+        while True:
+            try:
+                self.state["queue"].get_nowait()
+            except queue.Empty:
+                break
+        self.state["queue"].put(_END)
+        self.state["done"].set()
 
 
 class VoiceBrainBridge:
@@ -33,7 +87,7 @@ class VoiceBrainBridge:
             request_id = str(payload.get("request_id", ""))
             with self._lock:
                 state = self._requests.get(request_id)
-            if state is None:
+            if state is None or state["cancelled"].is_set():
                 return
             if payload.get("reset"):
                 state["buffer"] = ""
@@ -110,6 +164,7 @@ class VoiceBrainBridge:
             "sent_prefix": "",
             "submitted_at": time.perf_counter(),
             "first_sentence_logged": False,
+            "cancelled": threading.Event(),
         }
         with self._lock:
             self._requests[request_id] = state
@@ -137,24 +192,7 @@ class VoiceBrainBridge:
 
         threading.Thread(target=request, name=f"jarvis-brain-{request_id}", daemon=True).start()
 
-        def sentences() -> Iterator[str]:
-            try:
-                while True:
-                    item = state["queue"].get()
-                    if item is _END:
-                        return
-                    if isinstance(item, Exception):
-                        LOG.warning("Voice brain request failed: %s", type(item).__name__)
-                        continue
-                    if isinstance(item, dict) and item.get("reset"):
-                        yield item
-                        continue
-                    yield str(item)
-            finally:
-                with self._lock:
-                    self._requests.pop(request_id, None)
-
-        return sentences()
+        return ReplyStream(self, request_id, state)
 
     def close(self) -> None:
         try:
