@@ -6,6 +6,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 import logging
 import threading
+import time
 from typing import Any
 
 import numpy as np
@@ -19,6 +20,7 @@ LOG = logging.getLogger("jarvis.voice.audio_input")
 class AudioFrame:
     samples: np.ndarray
     sample_rate: int
+    captured_at: float = 0.0
 
 
 class AudioInput:
@@ -87,6 +89,7 @@ class AudioInput:
                     raw, _overflowed = stream.read(native_block)
                 else:
                     raw = stream(native_block)
+                captured_at = time.perf_counter() - float(getattr(stream, "latency", 0.0) or 0.0)
                 values = np.asarray(raw, dtype=np.float32)
                 if self.gain != 1.0:
                     values = np.clip(values * self.gain, -1.0, 1.0)
@@ -104,11 +107,12 @@ class AudioInput:
                     values = self._resampler.resample_chunk(values, last=False)
                 pending = np.concatenate((pending, np.asarray(values, dtype=np.float32).reshape(-1)))
                 while pending.size >= self.frame_samples:
+                    frame_end = captured_at - max(0, pending.size - self.frame_samples) / self.target_rate
                     frame = pending[: self.frame_samples].copy()
                     pending = pending[self.frame_samples :]
-                    yield AudioFrame(frame, self.target_rate)
+                    yield AudioFrame(frame, self.target_rate, frame_end)
         if self._resampler is not None:
             final = np.asarray(self._resampler.resample_chunk(np.empty(0, dtype=np.float32), last=True), dtype=np.float32)
             pending = np.concatenate((pending, final.reshape(-1)))
         if pending.size:
-            yield AudioFrame(pending.astype(np.float32), self.target_rate)
+            yield AudioFrame(pending.astype(np.float32), self.target_rate, time.perf_counter())
