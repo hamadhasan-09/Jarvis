@@ -1,0 +1,11 @@
+capabilities:
+  fs.read: auto_allow
+  fs.write: ask_every_time
+  fs.delete: ask_every_time
+  fs.execute: ask_every_time
+  shell.exec: ask_every_time
+  python.exec: ask_every_time
+  net.fetch: auto_allow
+  net.send: ask_every_time
+  credential.read: auto_allow
+  system.always_human: deny_always
