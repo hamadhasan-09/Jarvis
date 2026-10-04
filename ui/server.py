@@ -11,6 +11,7 @@ The browser voice path uses PersistentMemory as the source of truth for:
 from __future__ import annotations
 
 import hmac
+import json
 import os
 import re
 import sys
@@ -41,6 +42,8 @@ from core.rate_limiter import RateLimiter  # noqa: E402
 from core.runtime_config import env_bool_or_config, env_or_config, load_runtime_config  # noqa: E402
 from knowledge import KnowledgeBase  # noqa: E402
 from llm import ProviderManager, TaskRouter  # noqa: E402
+from llm.artifact_bus import ArtifactBus  # noqa: E402
+from llm.coordinator import Coordinator  # noqa: E402
 from security_v2.prompt_defense import PromptDefense  # noqa: E402
 from backend.request_coordinator import RequestCoordinator  # noqa: E402
 from web import WebResearcher  # noqa: E402
@@ -51,6 +54,8 @@ from engine.executor import Executor  # noqa: E402
 from engine.verifier import Verifier  # noqa: E402
 from engine.learner import Learner  # noqa: E402
 from backend.approval_service import BrowserApprovalGateway  # noqa: E402
+from security_v2.broker import SecurityBroker  # noqa: E402
+from security_v2.key_manager import SecureKeyManager  # noqa: E402
 from brain.router import QalbRouter, detect_voice_language  # noqa: E402
 from voice.config import load_config as load_voice_config  # noqa: E402
 from brain.router import validate_urdu_output  # noqa: E402
@@ -73,6 +78,14 @@ KNOWLEDGE_TOP_K = max(1, min(int(env_or_config(RUNTIME_CONFIG, "JARVIS_KNOWLEDGE
 WEB_ENABLED = env_bool("JARVIS_WEB_ENABLED", True)
 WEB_TOP_K = max(1, min(int(os.getenv("JARVIS_WEB_TOP_K", "5")), 8))
 WEB_TIMEOUT = max(2.0, min(float(os.getenv("JARVIS_WEB_TIMEOUT", str(env_or_config(RUNTIME_CONFIG, "JARVIS_WEB_TIMEOUT", ("web", "timeout_seconds"), "8")))), 20.0))
+ENSEMBLE_ENABLED = env_bool_or_config(RUNTIME_CONFIG, "JARVIS_ENSEMBLE_ENABLED", ("providers", "ensemble_enabled"), False)
+ENSEMBLE_TASK_TYPES = {t.strip().upper() for t in os.getenv("JARVIS_ENSEMBLE_TASK_TYPES", "REASONING,RESEARCH,CODING").split(",") if t.strip()}
+COORDINATOR_ENABLED = env_bool("JARVIS_COORDINATOR_ENABLED", False)
+COORDINATOR_TASK_TYPES = {
+    item.strip().upper()
+    for item in os.getenv("JARVIS_COORDINATOR_TASK_TYPES", "REASONING,RESEARCH,CODING").split(",")
+    if item.strip()
+}
 JARVIS_HOST = os.getenv("JARVIS_HOST", "127.0.0.1").strip() or "127.0.0.1"
 JARVIS_PORT = max(1, min(int(os.getenv("JARVIS_PORT", "5000")), 65535))
 AUTO_OPEN_BROWSER = env_bool("JARVIS_AUTO_OPEN", True)
@@ -98,30 +111,54 @@ socketio = SocketIO(app, cors_allowed_origins=[item.strip() for item in CORS_ORI
 # One local desktop installation represents one personal user. A stable session
 # id makes memory survive browser reconnects and Windows restarts.
 memory = PersistentMemory(project_root=ROOT_DIR)
-provider_manager = ProviderManager(project_root=ROOT_DIR)
+engine_gateway = BrowserApprovalGateway(socketio)
+security_broker = SecurityBroker(
+    gateway=engine_gateway,
+    key_manager=SecureKeyManager(),
+    audit_log_path=str(ROOT_DIR / "data" / "logs" / "permission_audit.jsonl"),
+)
+provider_manager = ProviderManager(project_root=ROOT_DIR, broker=security_broker)
 task_router = TaskRouter(provider_manager=provider_manager)
+artifact_bus = ArtifactBus()
+coordinator = Coordinator(provider_manager, artifact_bus)
 knowledge = KnowledgeBase(ROOT_DIR) if KNOWLEDGE_ENABLED else None
 web_research = WebResearcher(timeout=WEB_TIMEOUT) if WEB_ENABLED else None
 memory_lock = threading.RLock()
 pending_forget: dict[str, dict[str, object]] = {}
 pending_forget_lock = threading.RLock()
+_voice_request_controls: dict[str, dict[str, object]] = {}
+_voice_request_controls_lock = threading.RLock()
 
 # Live request guards: these are backend services, not UI policy.
 prompt_defense = PromptDefense()
 rate_limiter = RateLimiter(project_root=ROOT_DIR)
 request_coordinator = RequestCoordinator()
 
-engine_gateway = BrowserApprovalGateway(socketio)
 engine_learner = Learner()
 engine_orchestrator = Orchestrator(
     planner=Planner(provider_manager, task_router),
     router=task_router,
-    executor=Executor(provider_manager, engine_gateway, workspace_dir=str(ROOT_DIR)),
+    executor=Executor(provider_manager, engine_gateway, workspace_dir=str(ROOT_DIR), broker=security_broker),
     verifier=Verifier(provider_manager, task_router),
     learner=engine_learner,
     memory=memory,
     gateway=engine_gateway,
     errors=None
+)
+from engine.job_runtime import JobRuntime  # noqa: E402
+
+job_runtime = JobRuntime(
+    ROOT_DIR / "data" / "jobs.sqlite3",
+    provider_manager=provider_manager,
+    task_router=task_router,
+    orchestrator=engine_orchestrator,
+    coordinator=coordinator,
+    broker=security_broker,
+    approval_gateway=engine_gateway,
+    approval_client_provider=lambda: (_presentation_sids() or [None])[-1],
+    poll_interval=float(os.getenv("JARVIS_JOB_POLL_SECONDS", "3")),
+    lease_seconds=float(os.getenv("JARVIS_JOB_LEASE_SECONDS", "1800")),
+    approval_stale_seconds=float(os.getenv("JARVIS_JOB_APPROVAL_STALE_SECONDS", "300")),
 )
 
 if not provider_manager.has_primary:
@@ -650,6 +687,24 @@ def on_connect(auth=None):
             "verification_enabled": task_router.verification_enabled,
         },
     )
+    pending_jobs = job_runtime.pending_announcements()
+    if pending_jobs:
+        summaries = []
+        for job in pending_jobs:
+            result = job.get("result") or {}
+            summary = result.get("text") or result.get("reply") if isinstance(result, dict) else str(result)
+            summaries.append(f"{job['type']}: {str(summary or 'completed')[:500]}")
+        emit(
+            "jarvis_reply",
+            {
+                "text": "While you were away, these background tasks completed: " + "; ".join(summaries),
+                "task_type": "GENERAL",
+                "provider": "job_runtime",
+                "request_id": uuid.uuid4().hex,
+                "background_jobs": [job["id"] for job in pending_jobs],
+            },
+        )
+        job_runtime.mark_announced([job["id"] for job in pending_jobs])
 
 
 def _security_reply(language_hint=""):
@@ -699,6 +754,21 @@ def secure_user_request(handler):
     return wrapped
 
 
+@socketio.on("voice_cancel")
+def on_voice_cancel(data):
+    if not isinstance(data, dict) or not _is_local_voice_sid(request.sid):
+        return
+    request_id = str(data.get("request_id", "")).strip()[:80]
+    with _voice_request_controls_lock:
+        control = _voice_request_controls.get(request_id)
+        if control is None or control.get("sid") != request.sid:
+            return
+        control["heard_text"] = str(data.get("heard_text", "")).strip()
+        cancel_event = control.get("cancel_event")
+        if isinstance(cancel_event, threading.Event):
+            cancel_event.set()
+
+
 @socketio.on("user_speech")
 @secure_user_request
 def on_user_speech(data):
@@ -730,10 +800,20 @@ def on_user_speech(data):
             return
         event_payload = dict(payload) if isinstance(payload, dict) else {}
         event_payload.setdefault("request_id", request_id)
+        if event_name == "jarvis_reply" and cancellation is not None and cancellation.is_set():
+            with _voice_request_controls_lock:
+                control = _voice_request_controls.get(request_id, {})
+                event_payload["text"] = str(control.get("heard_text", ""))
         if turn_id:
             event_payload.setdefault("turn_id", turn_id)
         event_payload.setdefault("session_id", origin_session_id)
-        if event_name == "jarvis_reply" and speech_language == "ur" and qalb_mode == "hybrid" and qalb_enabled:
+        if (
+            event_name == "jarvis_reply"
+            and speech_language == "ur"
+            and qalb_mode == "hybrid"
+            and qalb_enabled
+            and not (cancellation is not None and cancellation.is_set())
+        ):
             brain_result = str(event_payload.get("text", ""))
             try:
                 recent_history = memory.get_recent(session_id=origin_session_id, limit=MAX_CONTEXT_MESSAGES)
@@ -743,35 +823,53 @@ def on_user_speech(data):
                     history=recent_history,
                     on_sentence=emit_qalb_sentence,
                     on_reset=emit_qalb_reset,
+                    cancel_event=cancellation,
                 )
                 event_payload["text"] = urdu_reply
                 event_payload["spoken_by"] = "qalb"
             except Exception as exc:
-                print(
-                    f"[BRAIN ROUTER] Qalb unavailable for Urdu hybrid reply; using main-brain Urdu fallback "
-                    f"({type(exc).__name__})",
-                    flush=True,
-                )
-                try:
-                    event_payload["text"] = _main_brain_urdu_fallback(
-                        user_text, brain_result, language_hint, request_id
+                if cancellation is not None and cancellation.is_set():
+                    with _voice_request_controls_lock:
+                        control = _voice_request_controls.get(request_id, {})
+                        event_payload["text"] = str(control.get("heard_text", ""))
+                    event_payload["spoken_by"] = "interrupted"
+                    exc = None
+                if exc is None:
+                    pass
+                else:
+                    print(
+                        f"[BRAIN ROUTER] Qalb unavailable for Urdu hybrid reply; using main-brain Urdu fallback "
+                        f"({type(exc).__name__})",
+                        flush=True,
                     )
-                    event_payload["spoken_by"] = "main_brain_urdu_fallback"
-                    event_payload["fallback_used"] = True
-                except Exception as fallback_exc:
-                    print(f"[BRAIN ROUTER] Urdu fallback failed: {type(fallback_exc).__name__}", flush=True)
-                    event_payload["text"] = "معذرت، اس وقت مکمل جواب تیار نہیں ہو سکا۔"
-                    event_payload["spoken_by"] = "safe_urdu_fallback"
-                from voice.text_cleaner import split_sentences
+                    try:
+                        event_payload["text"] = _main_brain_urdu_fallback(
+                            user_text, brain_result, language_hint, request_id
+                        )
+                        event_payload["spoken_by"] = "main_brain_urdu_fallback"
+                        event_payload["fallback_used"] = True
+                    except Exception as fallback_exc:
+                        print(f"[BRAIN ROUTER] Urdu fallback failed: {type(fallback_exc).__name__}", flush=True)
+                        event_payload["text"] = "معذرت، اس وقت مکمل جواب تیار نہیں ہو سکا۔"
+                        event_payload["spoken_by"] = "safe_urdu_fallback"
+                if event_payload.get("spoken_by") in {"main_brain_urdu_fallback", "safe_urdu_fallback"}:
+                    from voice.text_cleaner import split_sentences
 
-                for sentence in split_sentences(str(event_payload.get("text", "")), "ur"):
-                    emit_qalb_sentence(sentence)
+                    for sentence in split_sentences(str(event_payload.get("text", "")), "ur"):
+                        emit_qalb_sentence(sentence)
             if event_payload.get("spoken_by") in {"qalb", "main_brain_urdu_fallback", "safe_urdu_fallback"}:
                 memory.save_message(
                     SESSION_ID,
                     "assistant",
                     str(event_payload.get("text", "")),
                     {"source": event_payload.get("spoken_by"), "spoken_language": "ur", "request_id": request_id},
+                )
+            elif event_payload.get("spoken_by") == "interrupted" and str(event_payload.get("text", "")).strip():
+                memory.save_message(
+                    SESSION_ID,
+                    "assistant",
+                    str(event_payload.get("text", "")).strip(),
+                    {"source": "interrupted", "spoken_language": "ur", "request_id": request_id},
                 )
         if event_name == "jarvis_reply":
             text_length = len(str(event_payload.get("text", "")))
@@ -782,8 +880,13 @@ def on_user_speech(data):
                 flush=True,
             )
         _route_event(event_name, event_payload, request.sid, local_voice=local_voice_request)
+        if event_name == "jarvis_reply" and cancellation is not None:
+            with _voice_request_controls_lock:
+                _voice_request_controls.pop(request_id, None)
 
     def emit_qalb_sentence(sentence: str) -> None:
+        if cancellation is not None and cancellation.is_set():
+            return
         token_payload = {
             "token": str(sentence).strip() + " ",
             "is_first": False,
@@ -811,6 +914,16 @@ def on_user_speech(data):
         _route_event("jarvis_reply_token", reset_payload, request.sid, local_voice=local_voice_request)
     if not user_text:
         return
+
+    cancellation = None
+    if local_voice_request and request_id:
+        cancellation = threading.Event()
+        with _voice_request_controls_lock:
+            _voice_request_controls[request_id] = {
+                "sid": request.sid,
+                "cancel_event": cancellation,
+                "heard_text": "",
+            }
 
     print(f"User: {user_text}")
     route_emit("status", {"state": "thinking", "request_id": request_id})
@@ -856,8 +969,22 @@ def on_user_speech(data):
                 history=recent_history,
                 on_sentence=emit_qalb_sentence,
                 on_reset=emit_qalb_reset,
+                cancel_event=cancellation,
             )
         except Exception as exc:
+            if cancellation is not None and cancellation.is_set():
+                with _voice_request_controls_lock:
+                    control = _voice_request_controls.get(request_id, {})
+                    heard_reply = str(control.get("heard_text", ""))
+                if heard_reply:
+                    memory.save_message(
+                        SESSION_ID,
+                        "assistant",
+                        heard_reply,
+                        {"source": "interrupted", "request_id": request_id},
+                    )
+                route_emit("jarvis_reply", {"text": heard_reply, "request_id": request_id, "provider": "qalb", "task_type": "GENERAL"})
+                return
             print(
                 f"[BRAIN ROUTER] Qalb direct mode failed; handing the request to the existing brain "
                 f"({type(exc).__name__})",
@@ -969,43 +1096,96 @@ def on_user_speech(data):
         try:
             effective_language_hint = speech_language if speech_language in {"en", "ur"} else language_hint
             messages = build_messages(user_text, effective_language_hint, knowledge_context, web_context, voice_language=speech_language)
-            stream_gen = provider_manager.stream_generate(
-                route,
-                messages,
-                temperature=0.65,
-                max_tokens=600,
-                timeout=18.0,
-                metadata={"task_type": task.task_type, "retrieval": retrieval_active, "web_retrieval": bool(web_retrieved), "request_id": request_id},
-            )
-            is_first = True
-            for chunk in stream_gen:
-                if isinstance(chunk, dict) and chunk.get("__reset__"):
-                    # A failed primary stream must replace its partial UI buffer
-                    # before fallback text starts; never concatenate providers.
-                    reply = ""
-                    is_first = True
-                    route_emit("jarvis_reply_token", {"token": "", "reset": True, "is_first": True, "request_id": request_id, "task_id": request_id})
-                    continue
-                if isinstance(chunk, dict) and chunk.get("__done__"):
-                    if chunk.get("error"):
-                        raise Exception(chunk["error"])
-                    reply = clean_reply(chunk.get("full_text", ""))
-                    provider_name = chunk.get("provider", "none")
-                    model_name = chunk.get("model", "none")
-                    fallback_used = bool(chunk.get("fallback_used"))
-                    break
-                elif isinstance(chunk, str) and chunk:
-                    # Ensure unicode spaces/dashes are cleaned for the stream UI as well
-                    clean_chunk = (
-                        chunk.replace("\u00a0", " ")
-                        .replace("\u202f", " ")
-                        .replace("\u2011", "-")
-                        .replace("\u2013", "-")
-                        .replace("\u2014", "-")
+            coordinator_used = False
+            coordinator_attempted = COORDINATOR_ENABLED and task.task_type in COORDINATOR_TASK_TYPES
+            if coordinator_attempted:
+                try:
+                    coordinated = coordinator.run(
+                        request_id,
+                        messages,
+                        temperature=0.65,
+                        max_tokens=700,
+                        timeout=25.0,
+                        metadata={"task_type": task.task_type, "retrieval": retrieval_active, "web_retrieval": bool(web_retrieved), "request_id": request_id},
                     )
-                    route_emit("jarvis_reply_token", {"token": clean_chunk, "is_first": is_first, "request_id": request_id, "task_id": request_id})
-                    is_first = False
-            if route.verify:
+                    reply = clean_reply(coordinated.text)
+                    route_emit("jarvis_reply_token", {"token": reply, "is_first": True, "request_id": request_id, "task_id": request_id})
+                    provider_name = "coordinator"
+                    model_name = ",".join(coordinated.metadata.get("coordinator_models", []))
+                    fallback_used = False
+                    coordinator_used = True
+                except Exception as exc:
+                    print(f"Coordinator route notice: {type(exc).__name__}: {exc}")
+
+            ensemble_used = coordinator_used
+            if not coordinator_attempted and ENSEMBLE_ENABLED and task.task_type in ENSEMBLE_TASK_TYPES:
+                try:
+                    ensemble_response = provider_manager.generate_ensemble(
+                        route,
+                        messages,
+                        temperature=0.65,
+                        max_tokens=700,
+                        timeout=25.0,
+                        metadata={"task_type": task.task_type, "retrieval": retrieval_active, "web_retrieval": bool(web_retrieved), "request_id": request_id},
+                    )
+                    reply = clean_reply(ensemble_response.text)
+                    route_emit("jarvis_reply_token", {"token": reply, "is_first": True, "request_id": request_id, "task_id": request_id})
+                    provider_name = "ensemble"
+                    model_name = "+".join(ensemble_response.metadata.get("ensemble_models", []))
+                    fallback_used = False
+                    ensemble_used = True
+                except Exception as exc:
+                    print(f"Ensemble route notice: {type(exc).__name__}: {exc}")
+
+            if not ensemble_used:
+                stream_gen = provider_manager.stream_generate(
+                    route,
+                    messages,
+                    temperature=0.65,
+                    max_tokens=600,
+                    timeout=18.0,
+                    metadata={"task_type": task.task_type, "retrieval": retrieval_active, "web_retrieval": bool(web_retrieved), "request_id": request_id},
+                )
+                is_first = True
+                try:
+                    for chunk in stream_gen:
+                        if cancellation is not None and cancellation.is_set():
+                            break
+                        if isinstance(chunk, dict) and chunk.get("__reset__"):
+                            # A failed primary stream must replace its partial UI buffer
+                            # before fallback text starts; never concatenate providers.
+                            reply = ""
+                            is_first = True
+                            route_emit("jarvis_reply_token", {"token": "", "reset": True, "is_first": True, "request_id": request_id, "task_id": request_id})
+                            continue
+                        if isinstance(chunk, dict) and chunk.get("__done__"):
+                            if chunk.get("error"):
+                                raise Exception(chunk["error"])
+                            reply = clean_reply(chunk.get("full_text", ""))
+                            provider_name = chunk.get("provider", "none")
+                            model_name = chunk.get("model", "none")
+                            fallback_used = bool(chunk.get("fallback_used"))
+                            break
+                        elif isinstance(chunk, str) and chunk:
+                            # Ensure unicode spaces/dashes are cleaned for the stream UI as well
+                            clean_chunk = (
+                                chunk.replace("\u00a0", " ")
+                                .replace("\u202f", " ")
+                                .replace("\u2011", "-")
+                                .replace("\u2013", "-")
+                                .replace("\u2014", "-")
+                            )
+                            route_emit("jarvis_reply_token", {"token": clean_chunk, "is_first": is_first, "request_id": request_id, "task_id": request_id})
+                            is_first = False
+                finally:
+                    close_stream = getattr(stream_gen, "close", None)
+                    if callable(close_stream):
+                        close_stream()
+                if cancellation is not None and cancellation.is_set():
+                    with _voice_request_controls_lock:
+                        control = _voice_request_controls.get(request_id, {})
+                        reply = str(control.get("heard_text", ""))
+            if route.verify and not (cancellation is not None and cancellation.is_set()):
                 route_emit("status", {"state": "verifying", "request_id": request_id, "task_type": task.task_type})
                 verification = provider_manager.verify(route, user_text, reply, source_items)
                 if verification.get("performed") is not True or verification.get("passed") is not True:
@@ -1014,23 +1194,34 @@ def on_user_speech(data):
             print(f"Provider route notice: {type(exc).__name__}: {exc}")
             reply = "I am online, but the configured language provider is unavailable right now, Sir."
 
-    reply = reply or "Yes, Sir. How can I assist you?"
-    memory.save_message(
-        SESSION_ID,
-        "assistant",
-        reply,
-        {
-            "source": provider_name,
-            "provider": provider_name,
-            "model": model_name,
-            "fallback_used": fallback_used,
-            "task_type": task.task_type,
-            "retrieval_active": retrieval_active,
-            "web_retrieval_active": bool(web_retrieved),
-            "sources_count": len(source_items),
-            "verification_performed": bool(verification.get("performed")),
-        },
+    was_voice_cancelled = cancellation is not None and cancellation.is_set()
+    if was_voice_cancelled:
+        route_emit("jarvis_reply_token", {"token": "", "reset": True, "is_first": True, "request_id": request_id, "task_id": request_id})
+    else:
+        reply = reply or "Yes, Sir. How can I assist you?"
+    defer_memory_to_qalb = (
+        local_voice_request
+        and speech_language == "ur"
+        and qalb_mode == "hybrid"
+        and qalb_enabled
     )
+    if reply and not defer_memory_to_qalb:
+        memory.save_message(
+            SESSION_ID,
+            "assistant",
+            reply,
+            {
+                "source": provider_name,
+                "provider": provider_name,
+                "model": model_name,
+                "fallback_used": fallback_used,
+                "task_type": task.task_type,
+                "retrieval_active": retrieval_active,
+                "web_retrieval_active": bool(web_retrieved),
+                "sources_count": len(source_items),
+                "verification_performed": bool(verification.get("performed")),
+            },
+        )
     print(f"JARVIS: {reply}")
     route_emit(
         "jarvis_reply",
@@ -1170,6 +1361,7 @@ if __name__ == "__main__":
     print(f"  Listening locally at: http://{JARVIS_HOST}:{JARVIS_PORT}")
     print("=" * 60 + "\n")
     threading.Thread(target=auto_open_browser, daemon=True).start()
+    job_runtime.start()
     try:
         socketio.run(
             app,
@@ -1179,6 +1371,7 @@ if __name__ == "__main__":
             allow_unsafe_werkzeug=True,
         )
     finally:
+        job_runtime.close()
         if local_voice is not None:
             local_voice.stop()
         if voice_brain_bridge is not None:
