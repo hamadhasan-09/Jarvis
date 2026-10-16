@@ -94,6 +94,11 @@ export function createHudApp(documentRef = document) {
       }
     },
 
+    onInterrupt: (heardText, wasSpeaking) => {
+      const replyCancelled = conversation && conversation.cancelActiveReply(heardText);
+      if (wasSpeaking || replyCancelled) tts.cancel();
+    },
+
     onFinalTranscript: (text) => {
       if (conversation) {
         conversation.receiveFinalTranscript(text);

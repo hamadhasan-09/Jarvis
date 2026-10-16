@@ -15,7 +15,14 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from ui import server
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def isolated_server(isolated_auth_server):
+    global server
+    server = isolated_auth_server
+    server.VOICE_LOCAL_TOKEN = "synthetic-legacy-voice-token"
 
 
 def _payloads(client, event_name: str):
@@ -47,11 +54,22 @@ def _registered_sid(role: str) -> str:
     return matches[0]
 
 
+def _authenticated_browser():
+    http_client = server.app.test_client()
+    token = server.browser_auth.issue_owner_pairing_token()
+    assert http_client.post("/auth/pair", json={"token": token}, headers={"X-Nexus-Browser-Auth": "1"}).status_code == 200
+    return server.socketio.test_client(
+        server.app,
+        auth=None,
+        flask_test_client=http_client,
+    )
+
+
 def test_local_reply_routes_to_owner_and_browser_presentation_only():
-    browser = server.socketio.test_client(server.app, auth=None)
+    browser = _authenticated_browser()
     local = server.socketio.test_client(
         server.app,
-        auth={"role": "local_voice", "session_id": "routing-test"},
+        auth={"role": "local_voice", "session_id": "routing-test", "token": server.VOICE_LOCAL_TOKEN},
     )
     try:
         _payloads(browser, "system_status")
@@ -90,10 +108,10 @@ def test_local_reply_routes_to_owner_and_browser_presentation_only():
 
 
 def test_local_user_speech_round_trip_preserves_correlation():
-    browser = server.socketio.test_client(server.app, auth=None)
+    browser = _authenticated_browser()
     local = server.socketio.test_client(
         server.app,
-        auth={"role": "local_voice", "session_id": "roundtrip-test"},
+        auth={"role": "local_voice", "session_id": "roundtrip-test", "token": server.VOICE_LOCAL_TOKEN},
     )
     original_memory_command = server.handle_memory_command
     original_save_message = server.memory.save_message
@@ -129,10 +147,10 @@ def test_local_user_speech_round_trip_preserves_correlation():
 
 
 def test_local_voice_approval_requires_exact_owner_and_task_id():
-    browser = server.socketio.test_client(server.app, auth=None)
+    browser = _authenticated_browser()
     local = server.socketio.test_client(
         server.app,
-        auth={"role": "local_voice", "session_id": "approval-test"},
+        auth={"role": "local_voice", "session_id": "approval-test", "token": server.VOICE_LOCAL_TOKEN},
     )
     outcome = {}
     local_sid = _registered_sid("local_voice")
@@ -178,19 +196,4 @@ def test_local_voice_approval_requires_exact_owner_and_task_id():
 
 
 if __name__ == "__main__":
-    tests = [
-        test_local_reply_routes_to_owner_and_browser_presentation_only,
-        test_local_user_speech_round_trip_preserves_correlation,
-        test_local_voice_approval_requires_exact_owner_and_task_id,
-    ]
-    failures = []
-    for test in tests:
-        try:
-            test()
-            print(f"PASS {test.__name__}")
-        except Exception as exc:
-            failures.append((test.__name__, exc))
-            print(f"FAIL {test.__name__}: {type(exc).__name__}: {exc}")
-    if failures:
-        raise SystemExit(1)
-    print(f"PASS {len(tests)} voice routing tests")
+    raise SystemExit(pytest.main([__file__, "-q"]))

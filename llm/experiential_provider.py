@@ -6,6 +6,7 @@ The Experiential Labs gateway exposes an OpenAI-compatible /v1/chat/completions 
 from __future__ import annotations
 
 import json
+import threading
 from typing import Any, Iterable, Iterator
 
 import httpx
@@ -181,65 +182,72 @@ class ExperientialProvider(BaseProvider):
         max_tokens: int | None = None,
         timeout: float | None = None,
         metadata: dict[str, Any] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> Iterator[str]:
         if not self.is_configured:
             raise ProviderUnavailable(
                 self.provider_name,
                 "Experiential Labs is not configured",
             )
-
         request_timeout = max(1.0, float(timeout or self.timeout))
-        payload = self._payload(
-            messages, system_prompt, temperature, max_tokens, stream=True
-        )
+        payload = self._payload(messages, system_prompt, temperature, max_tokens, stream=True)
         url = f"{self.base_url}/chat/completions"
-
         try:
             with httpx.Client(timeout=request_timeout) as client:
                 with client.stream(
-                    "POST",
-                    url,
+                    "POST", url,
                     headers={**self._headers, "Accept": "text/event-stream"},
                     json=payload,
                 ) as response:
                     if response.status_code >= 400:
                         self._raise_http_error(response)
-
-                    for line in response.iter_lines():
-                        if not line:
-                            continue
-
-                        if isinstance(line, bytes):
-                            line = line.decode("utf-8", errors="replace")
-
-                        if not line.startswith("data:"):
-                            continue
-
-                        chunk = line[5:].strip()
-                        if chunk == "[DONE]":
-                            return
-
-                        try:
-                            data = json.loads(chunk)
-                        except json.JSONDecodeError:
-                            continue
-
-                        choices = data.get("choices") or []
-                        if not choices:
-                            continue
-
-                        delta = (choices[0].get("delta") or {}).get("content") or ""
-                        if isinstance(delta, str) and delta:
-                            yield delta
-
+                    watcher_stop = threading.Event()
+                    def close_on_cancel():
+                        while not watcher_stop.wait(0.025):
+                            if cancel_event is not None and cancel_event.is_set():
+                                response.close()
+                                return
+                    watcher = threading.Thread(target=close_on_cancel, name="jarvis-experiential-cancel", daemon=True)
+                    watcher.start()
+                    try:
+                        for line in response.iter_lines():
+                            if cancel_event is not None and cancel_event.is_set():
+                                return
+                            if not line:
+                                continue
+                            if isinstance(line, bytes):
+                                line = line.decode("utf-8", errors="replace")
+                            if not line.startswith("data:"):
+                                continue
+                            chunk = line[5:].strip()
+                            if chunk == "[DONE]":
+                                return
+                            try:
+                                data = json.loads(chunk)
+                            except json.JSONDecodeError:
+                                continue
+                            choices = data.get("choices") or []
+                            if not choices:
+                                continue
+                            delta = (choices[0].get("delta") or {}).get("content") or ""
+                            if isinstance(delta, str) and delta:
+                                yield delta
+                    finally:
+                        watcher_stop.set()
+                        if cancel_event is not None and cancel_event.is_set():
+                            response.close()
         except ProviderError:
             raise
         except httpx.TimeoutException as exc:
+            if cancel_event is not None and cancel_event.is_set():
+                return
             raise ProviderError(
                 self.provider_name,
                 f"stream timeout after {request_timeout:.1f}s",
             ) from exc
         except Exception as exc:
+            if cancel_event is not None and cancel_event.is_set():
+                return
             raise ProviderError(
                 self.provider_name,
                 type(exc).__name__ + ": " + sanitize_error(exc),

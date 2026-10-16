@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import builtins
 import json
+import logging
 import sys
 import threading
 import time
@@ -18,6 +19,9 @@ from enum import Enum
 from pathlib import Path
 
 from core.memory_manager import SecretDetector
+from core.contracts import GoalActionOutcome
+
+LOG = logging.getLogger(__name__)
 
 
 def _safe_print(*args, **kwargs):
@@ -171,6 +175,14 @@ class Orchestrator:
 
             obj.status = Status.COMPLETED
             obj.completed_at = datetime.now()
+            outcome_record = GoalActionOutcome(
+                goal_ref=obj.id,
+                action="execute_objective",
+                outcome="Objective verified successfully",
+                success=True,
+                confidence=float(final.get("confidence", 0.0)),
+            )
+            LOG.debug("Goal/action/outcome contract sample: %s", outcome_record)
             self.learner.learn_from_objective(obj, obj.results)
             self.completed.append(obj)
             self.active.pop(obj.id, None)

@@ -1,5 +1,4 @@
 import { HUD_CONFIG } from "./config.js";
-import { HUD_CONFIG } from "./config.js";
 import { parseMicrophoneControl, parseVoiceControl, voiceConfirmation } from "./voice-commands.js";
 
 export class ConversationController {
@@ -20,7 +19,12 @@ export class ConversationController {
     this.pendingRequests = new Map();
     this.expiredRequestIds = new Set();
     this.activeStreamRequestId = null;
+    this.activeSpeechRequestId = null;
     this.microphoneMuted = false;
+    this.ttsLifecycleUnsubscribers = [
+      this.tts.on("end", () => this.#finishSpeechPlayback()),
+      this.tts.on("error", (event = {}) => this.cancelActiveReply(event.spokenText || "")),
+    ];
   }
 
   receiveUserSpeech(text) {
@@ -112,6 +116,25 @@ export class ConversationController {
     this.socket.emit("user_speech", { text, request_id: requestId, language_hint: languageHint || this.preferences.detectLanguageHint(text) });
   }
 
+  cancelActiveReply(heardText = "") {
+    const requestId = this.activeStreamRequestId || this.activeSpeechRequestId;
+    if (!requestId) return false;
+    this.socket.emit("voice_cancel", { request_id: requestId, heard_text: String(heardText || "") });
+    this.activeStreamRequestId = null;
+    this.activeSpeechRequestId = null;
+    this.expiredRequestIds.add(requestId);
+    window.setTimeout(() => this.expiredRequestIds.delete(requestId), HUD_CONFIG.lateEventQuarantineMs);
+    this.dom.jarvisLive.textContent = String(heardText || "");
+    return true;
+  }
+
+  #finishSpeechPlayback() {
+    const requestId = this.activeSpeechRequestId;
+    if (!requestId) return;
+    this.socket.emit("voice_playback_done", { request_id: requestId });
+    this.activeSpeechRequestId = null;
+  }
+
   #expireRequest(requestId) {
     if (!this.pendingRequests.has(requestId)) return;
     window.clearTimeout(this.pendingRequests.get(requestId));
@@ -176,7 +199,13 @@ export class ConversationController {
     this.dom.jarvisLive.textContent = text;
     this.dom.taskState.textContent = "IDLE";
     this.hudState.setBackendState("idle");
-    if (!HUD_CONFIG.localVoiceMode) this.tts.speak(text);
+    if (!HUD_CONFIG.localVoiceMode && text) {
+      this.activeSpeechRequestId = requestId;
+      if (!this.tts.speak(text)) this.#finishSpeechPlayback();
+    } else if (requestId && !HUD_CONFIG.localVoiceMode) {
+      this.activeSpeechRequestId = requestId;
+      this.#finishSpeechPlayback();
+    }
     return true;
   }
 
@@ -186,6 +215,8 @@ export class ConversationController {
     for (const timeoutId of this.pendingRequests.values()) window.clearTimeout(timeoutId);
     this.pendingRequests.clear();
     this.expiredRequestIds.clear();
+    this.activeSpeechRequestId = null;
+    for (const unsubscribe of this.ttsLifecycleUnsubscribers) unsubscribe();
     this.speechBuffer = "";
   }
 }

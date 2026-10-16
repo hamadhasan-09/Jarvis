@@ -1,13 +1,14 @@
 import { HUD_CONFIG } from "./config.js";
 
 export class VoiceInterface {
-  constructor({ dom, preferences, tts, audio, lifecycle, onUserSpeech, onFinalTranscript, onEnded, onStatus }) {
+  constructor({ dom, preferences, tts, audio, lifecycle, onUserSpeech, onInterrupt, onFinalTranscript, onEnded, onStatus }) {
     this.dom = dom;
     this.preferences = preferences;
     this.tts = tts;
     this.audio = audio;
     this.lifecycle = lifecycle;
     this.onUserSpeech = onUserSpeech || (() => {});
+    this.onInterrupt = onInterrupt || (() => {});
     this.onFinalTranscript = onFinalTranscript || (() => {});
     this.onEnded = onEnded || (() => {});
     this.onStatus = onStatus || (() => {});
@@ -140,10 +141,12 @@ export class VoiceInterface {
       if (activeText && this.tts.isSpeaking && this.#isLikelyEcho(activeText)) return;
       if (activeText && !this.muted) {
         this.onUserSpeech(activeText);
-        if (this.tts.isSpeaking) {
-          this.tts.cancel();
+        const wasSpeaking = this.tts.isSpeaking;
+        const heardText = wasSpeaking ? this.tts.spokenText : "";
+        if (wasSpeaking) {
           this.onStatus("LISTENING", "Interrupted - listening again.", "interrupted");
         }
+        this.onInterrupt(heardText, wasSpeaking);
       }
       if (finalTranscript.trim()) {
         this.preferences.setLastInputLanguage(this.preferences.detectLanguageHint(finalTranscript));

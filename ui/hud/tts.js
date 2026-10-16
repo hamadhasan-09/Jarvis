@@ -9,6 +9,7 @@ export class TtsInterface {
     this.synth = "speechSynthesis" in window ? window.speechSynthesis : null;
     this.voices = [];
     this.currentText = "";
+    this.spokenCharIndex = 0;
     this.currentUtterance = null;
     this.speaking = false;
     this.listeners = Object.fromEntries(EVENTS.map((event) => [event, new Set()]));
@@ -48,7 +49,12 @@ export class TtsInterface {
     if (this.synth) this.synth.cancel();
     this.currentUtterance = null;
     this.currentText = "";
+    this.spokenCharIndex = 0;
     this.speaking = false;
+  }
+
+  get spokenText() {
+    return this.currentText.slice(0, this.spokenCharIndex).trimEnd();
   }
 
   #selectVoice(languageCode) {
@@ -84,32 +90,43 @@ export class TtsInterface {
       if (voice) utterance.voice = voice;
       this.currentUtterance = utterance;
       this.currentText = value;
+      this.spokenCharIndex = 0;
       utterance.onstart = () => {
         if (this.currentUtterance !== utterance) return;
         this.speaking = true;
         this.emit("start", { text: value });
       };
+      utterance.onboundary = (event) => {
+        if (this.currentUtterance !== utterance) return;
+        const index = Number(event && event.charIndex);
+        if (Number.isFinite(index)) this.spokenCharIndex = Math.max(this.spokenCharIndex, index);
+      };
       utterance.onend = () => {
         if (this.currentUtterance !== utterance) return;
         this.speaking = false;
         this.currentUtterance = null;
+        this.spokenCharIndex = value.length;
         this.currentText = "";
         this.emit("end", { text: value });
       };
       utterance.onerror = (event) => {
         if (this.currentUtterance !== utterance) return;
+        const spokenText = this.spokenText;
         this.speaking = false;
         this.currentUtterance = null;
         this.currentText = "";
-        this.emit("error", { error: event.error, text: value });
+        this.spokenCharIndex = 0;
+        this.emit("error", { error: event.error, text: value, spokenText });
       };
       this.synth.speak(utterance);
       return true;
     } catch (error) {
+      const spokenText = this.spokenText;
       this.speaking = false;
       this.currentUtterance = null;
       this.currentText = "";
-      this.emit("error", { error: String(error), text: value });
+      this.spokenCharIndex = 0;
+      this.emit("error", { error: String(error), text: value, spokenText });
       return false;
     }
   }

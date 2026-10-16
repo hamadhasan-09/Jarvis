@@ -30,11 +30,32 @@ class BrowserApprovalGateway:
         self.pending: dict[str, dict[str, object]] = {}
         self.lock = threading.RLock()
         self._local = threading.local()
+        # Optional server-owned capability validator; existing non-browser
+        # adapters keep their policy behavior when no validator is installed.
+        self.client_authorizer = None
+
+    def _client_authorized(self, client_id):
+        if self.client_authorizer is None:
+            return True
+        try:
+            return bool(self.client_authorizer(client_id))
+        except Exception:
+            return False
 
     @contextmanager
-    def scoped(self, client_id: str | None = None, task_id: str | None = None):
+    def scoped(
+        self,
+        client_id: str | None = None,
+        task_id: str | None = None,
+        *,
+        on_approval_state=None,
+    ):
         previous = getattr(self._local, "scope", None)
-        self._local.scope = {"client_id": client_id, "task_id": task_id}
+        self._local.scope = {
+            "client_id": client_id,
+            "task_id": task_id,
+            "on_approval_state": on_approval_state,
+        }
         try:
             yield self
         finally:
@@ -53,6 +74,8 @@ class BrowserApprovalGateway:
         assessment = self.policy.assess(action_type, context)
         risk_level = assessment["level"]
         client_id, task_id = self._scope(context, kwargs)
+        if client_id and not self._client_authorized(client_id):
+            return False
 
         if assessment["status"] == "blocked":
             self.log(f"Approval blocked by policy: {action_type} [{risk_level}]")
@@ -89,11 +112,32 @@ class BrowserApprovalGateway:
             "target": self.secret_detector.redact(str(kwargs.get("target", context.get("target", "local workspace"))))[:300],
             "reason": assessment["reason"],
         }
+        scope = getattr(self._local, "scope", None) or {}
+        state_callback = scope.get("on_approval_state")
+        if state_callback:
+            try:
+                state_callback("awaiting_approval")
+            except Exception as exc:
+                with self.lock:
+                    self.pending.pop(approval_id, None)
+                self.log(f"Approval state could not be persisted for {action_type}: {type(exc).__name__}")
+                return False
         self._emit("status", {"state": "waiting_confirmation", "message": f"Action approval required: {action_type}", "request_id": approval_id, "task_id": task_id}, client_id)
         self._emit("approval_request", payload, client_id)
+        if not self._client_authorized(client_id):
+            self.deny_pending(client_id=client_id)
         self.log(f"Approval requested: {action_type} [{risk_level}]")
 
-        completed = event.wait(self.timeout_seconds)
+        state_callback_failed = False
+        try:
+            completed = event.wait(self.timeout_seconds)
+        finally:
+            if state_callback:
+                try:
+                    state_callback("running")
+                except Exception as exc:
+                    state_callback_failed = True
+                    self.log(f"Approval state could not be restored for {action_type}: {type(exc).__name__}")
         with self.lock:
             record = self.pending.pop(approval_id, None)
         approved = bool(
@@ -102,6 +146,8 @@ class BrowserApprovalGateway:
             and time.monotonic() <= float(record.get("expires_at", 0))
             and record.get("result") is True
             and record.get("client_id") == client_id
+            and not state_callback_failed
+            and self._client_authorized(client_id)
         )
         self._emit(
             "status",
@@ -117,6 +163,10 @@ class BrowserApprovalGateway:
 
     def respond(self, approval_id, result, client_id: str | None = None, task_id: str | None = None):
         """Resolve one pending request; malformed/stale/cross-client responses fail."""
+        if not self._client_authorized(client_id):
+            if client_id:
+                self.deny_pending(client_id=client_id)
+            return False
         if type(result) is not bool:
             return False
         request_key = str(approval_id or "")
@@ -157,6 +207,8 @@ class BrowserApprovalGateway:
         # Flask-SocketIO supports `to=`; tests and alternate adapters may expose
         # a smaller emit signature. Never silently fall back to a broadcast.
         if not client_id:
+            return False
+        if name == "approval_request" and not self._client_authorized(client_id):
             return False
         try:
             self.socketio.emit(name, payload, to=client_id)

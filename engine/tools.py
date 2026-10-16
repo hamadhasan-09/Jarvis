@@ -18,12 +18,13 @@ from security_v2.sandbox import CommandSandbox
 class Toolchain:
     """Parse model tool blocks and route them through the security boundary."""
 
-    def __init__(self, workspace_dir=".", approval_gateway=None):
+    def __init__(self, workspace_dir=".", approval_gateway=None, broker=None):
         requested = Path(workspace_dir).resolve()
         self.workspace_dir = requested if requested.name.lower() == "workspace" else requested / "workspace"
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
         self.sandbox = CommandSandbox(self.workspace_dir)
         self.approval_gateway = approval_gateway
+        self.broker = broker
         self.secret_detector = SecretDetector()
 
     def _safe_preview(self, value, limit=500):
@@ -53,13 +54,18 @@ class Toolchain:
 
     def run_bash(self, command, timeout=30):
         clean_command = self._safe_preview(command, 300)
-        approved, reason = self._approve(
-            "run_command",
-            {"command": clean_command, "risk": "high"},
-            f"Run sandboxed internal command:\n{clean_command}",
-        )
+        if self.broker is not None:
+            decision = self.broker.authorize("shell.exec", "run_command", {"command": command}, preview=command)
+            approved, reason = bool(decision.get("allowed")), str(decision.get("reason", "Denied by security policy."))
+        else:
+            approved, reason = self._approve(
+                "run_command",
+                {"command": clean_command, "risk": "high"},
+                f"Run sandboxed internal command:\n{clean_command}",
+            )
         if not approved:
-            return f"Blocked before execution: {reason}"
+            prefix = "🚫 Blocked by security policy" if self.broker is not None else "Blocked before execution"
+            return f"{prefix}: {reason}"
         return self._format_result("Sandboxed command", self.sandbox.execute(str(command), timeout=timeout))
 
     def run_python(self, code, timeout=30):
@@ -68,13 +74,23 @@ class Toolchain:
         if not valid:
             return f"Blocked before execution: {reason}"
 
-        approved, approval_reason = self._approve(
-            "execute_code",
-            {"bytes": len(code), "risk": "high"},
-            f"Generated pure Python is not executable under the current policy:\n{code[:500]}",
-        )
+        if self.broker is not None:
+            decision = self.broker.authorize(
+                "python.exec",
+                "execute_code",
+                {"bytes": len(code)},
+                preview=code[:500],
+            )
+            approved, approval_reason = bool(decision.get("allowed")), str(decision.get("reason", "Denied by security policy."))
+        else:
+            approved, approval_reason = self._approve(
+                "execute_code",
+                {"bytes": len(code), "risk": "high"},
+                f"Generated pure Python is not executable under the current policy:\n{code[:500]}",
+            )
         if not approved:
-            return f"Blocked before execution: {approval_reason}"
+            prefix = "🚫 Blocked by security policy" if self.broker is not None else "Blocked before execution"
+            return f"{prefix}: {approval_reason}"
 
         script_path = self.workspace_dir / f".jarvis_tool_{uuid.uuid4().hex}.py"
         try:

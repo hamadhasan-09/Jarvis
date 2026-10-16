@@ -9,6 +9,7 @@ This contract is the boundary between the local browser HUD and backend services
 - Approval requests are scoped internally to the originating Socket.IO client session and task. The backend emits them with `to=<client session>`; it never broadcasts an approval request.
 - A browser response must include the exact approval `id`, the matching `task_id`, and a JSON boolean. `true`, `false`, and only those booleans are valid; strings such as `"false"` are rejected.
 - Expired, duplicate, stale, cross-client, missing-task, or malformed approval responses are denied.
+- Protected memory and engine capabilities are granted only to a server-issued HUD session or a local-voice connection authenticated with `JARVIS_LOCAL_VOICE_TOKEN`; event payload roles, session IDs, loopback binding, and CORS are not credentials.
 
 ## Client -> backend events
 
@@ -39,6 +40,10 @@ The backend validates policy and scope again. The UI is never the authority for 
 ### Other client events
 
 `get_metrics`, `get_memory_stats`, and `forget_memory` are diagnostic/memory operations. Programmatic memory deletion requires an actual JSON boolean confirmation; no truthy string is accepted.
+
+Unauthenticated Socket.IO clients may keep an ordinary conversation, but they do
+not receive private memory context, durable memory writes, memory-management
+commands, privileged engine dispatch, or detailed memory/system diagnostics.
 
 ## Backend -> client events
 

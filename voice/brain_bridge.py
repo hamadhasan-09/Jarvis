@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from dataclasses import dataclass
 import logging
 import queue
 import re
@@ -12,9 +13,78 @@ import uuid
 from typing import Any
 
 import socketio
+from core.contracts import begin_turn, is_turn_current
 
 LOG = logging.getLogger("jarvis.voice.brain")
 _END = object()
+
+
+@dataclass(frozen=True)
+class ReplySentence:
+    request_id: str
+    text: str
+    session_id: str | None = None
+    turn_id: str | None = None
+
+
+class ReplyStream:
+    """Cancelable sentence iterator for the local voice client."""
+
+    def __init__(self, bridge: "VoiceBrainBridge", request_id: str, state: dict[str, Any]):
+        self.bridge = bridge
+        self.request_id = request_id
+        self.state = state
+        self._closed = False
+
+    @property
+    def session_id(self) -> str:
+        return str(self.state.get("session_id") or self.bridge.session_id)
+
+    @property
+    def turn_id(self) -> str | None:
+        value = self.state.get("turn_id")
+        return str(value) if value else None
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        while True:
+            item = self.state["queue"].get()
+            if item is _END:
+                self._closed = True
+                with self.bridge._lock:
+                    self.bridge._requests.pop(self.request_id, None)
+                raise StopIteration
+            if isinstance(item, Exception):
+                LOG.warning("Voice brain request failed: %s", type(item).__name__)
+                continue
+            if isinstance(item, dict) and item.get("reset"):
+                return item
+            return ReplySentence(self.request_id, str(item), self.session_id, self.turn_id)
+
+    def cancel(self, heard_text: str) -> None:
+        if self._closed or self.state["cancelled"].is_set():
+            return
+        self.state["cancelled"].set()
+        try:
+            self.bridge.socket.emit(
+                "voice_cancel",
+                {
+                    "request_id": self.request_id,
+                    "turn_id": self.turn_id,
+                    "heard_text": str(heard_text or ""),
+                },
+            )
+        except Exception:
+            LOG.exception("Could not send voice interruption to the brain server")
+        while True:
+            try:
+                self.state["queue"].get_nowait()
+            except queue.Empty:
+                break
+        self.state["queue"].put(_END)
+        self.state["done"].set()
 
 
 class VoiceBrainBridge:
@@ -26,6 +96,24 @@ class VoiceBrainBridge:
         self._requests: dict[str, dict[str, Any]] = {}
         self._lock = threading.RLock()
 
+        def update_turn(state, payload) -> bool:
+            turn_id = str(payload.get("turn_id", "") or state.get("turn_id") or "")
+            session_id = str(payload.get("session_id", "") or state.get("session_id") or self.session_id)
+            if turn_id:
+                state["turn_id"] = turn_id
+                state["session_id"] = session_id
+                if not is_turn_current(session_id, turn_id):
+                    state["cancelled"].set()
+                    while True:
+                        try:
+                            state["queue"].get_nowait()
+                        except queue.Empty:
+                            break
+                    state["queue"].put(_END)
+                    state["done"].set()
+                    return False
+            return not state["cancelled"].is_set()
+
         @self.socket.on("jarvis_reply_token")
         def on_token(payload):
             if not isinstance(payload, dict):
@@ -33,7 +121,7 @@ class VoiceBrainBridge:
             request_id = str(payload.get("request_id", ""))
             with self._lock:
                 state = self._requests.get(request_id)
-            if state is None:
+            if state is None or not update_turn(state, payload):
                 return
             if payload.get("reset"):
                 state["buffer"] = ""
@@ -65,7 +153,7 @@ class VoiceBrainBridge:
             request_id = str(payload.get("request_id", ""))
             with self._lock:
                 state = self._requests.get(request_id)
-            if state is None:
+            if state is None or not update_turn(state, payload):
                 return
             remaining = str(state.get("buffer", "")).strip()
             final_text = str(payload.get("text", "")).strip()
@@ -90,7 +178,14 @@ class VoiceBrainBridge:
 
         @self.socket.on("status")
         def on_status(payload):
-            if isinstance(payload, dict) and payload.get("state") in {"failed", "error"}:
+            if not isinstance(payload, dict):
+                return
+            request_id = str(payload.get("request_id", ""))
+            with self._lock:
+                state = self._requests.get(request_id)
+            if state is not None:
+                update_turn(state, payload)
+            if payload.get("state") in {"failed", "error"}:
                 LOG.warning("Brain request ended with state=%s", payload.get("state"))
 
     def connect(self) -> None:
@@ -103,6 +198,7 @@ class VoiceBrainBridge:
 
     def submit(self, text: str, lang: str) -> Iterator[str]:
         request_id = f"voice-{uuid.uuid4().hex[:12]}"
+        turn_id = begin_turn(self.session_id)
         state = {
             "queue": queue.Queue(),
             "done": threading.Event(),
@@ -110,6 +206,9 @@ class VoiceBrainBridge:
             "sent_prefix": "",
             "submitted_at": time.perf_counter(),
             "first_sentence_logged": False,
+            "cancelled": threading.Event(),
+            "session_id": self.session_id,
+            "turn_id": turn_id,
         }
         with self._lock:
             self._requests[request_id] = state
@@ -123,6 +222,7 @@ class VoiceBrainBridge:
                     {
                         "text": str(text),
                         "request_id": request_id,
+                        "turn_id": turn_id,
                         "language_hint": language_hint,
                         "lang": language_hint,
                         "source": "local_voice",
@@ -137,24 +237,7 @@ class VoiceBrainBridge:
 
         threading.Thread(target=request, name=f"jarvis-brain-{request_id}", daemon=True).start()
 
-        def sentences() -> Iterator[str]:
-            try:
-                while True:
-                    item = state["queue"].get()
-                    if item is _END:
-                        return
-                    if isinstance(item, Exception):
-                        LOG.warning("Voice brain request failed: %s", type(item).__name__)
-                        continue
-                    if isinstance(item, dict) and item.get("reset"):
-                        yield item
-                        continue
-                    yield str(item)
-            finally:
-                with self._lock:
-                    self._requests.pop(request_id, None)
-
-        return sentences()
+        return ReplyStream(self, request_id, state)
 
     def close(self) -> None:
         try:

@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
+import os
 import queue
 import threading
-from typing import Any
+import time
+from typing import Any, Callable
 
 import numpy as np
 
 from voice.config import VoiceConfig, load_config
+from core.contracts import is_turn_current
 
 
 @dataclass(frozen=True)
@@ -18,13 +22,18 @@ class PlaybackItem:
     sample_rate: int
     generation: int
     enqueued_at: float
+    on_complete: Callable[[bool], None] | None = None
+    turn_id: str | None = None
+    session_id: str | None = None
 
 
 class AudioOutput:
-    def __init__(self, config: VoiceConfig | None = None, *, stream_factory: Any = None):
+    def __init__(self, config: VoiceConfig | None = None, *, stream_factory: Any = None, reference_sink: Any = None):
         self.config = config or load_config()
         self.settings = self.config.section("audio")
         self.stream_factory = stream_factory
+        self.reference_sink = reference_sink
+        self.playback_start_callback: Callable[[], None] | None = None
         self._queue: queue.Queue[PlaybackItem | None] = queue.Queue(
             maxsize=int(self.settings.get("playback_queue_size", 32))
         )
@@ -46,20 +55,51 @@ class AudioOutput:
         self._thread = threading.Thread(target=self._playback_loop, name="jarvis-playback", daemon=True)
         self._thread.start()
 
-    def enqueue(self, samples: np.ndarray, sample_rate: int, generation: int) -> bool:
+    def enqueue(
+        self,
+        samples: np.ndarray,
+        sample_rate: int,
+        generation: int,
+        *,
+        on_complete: Callable[[bool], None] | None = None,
+        turn_id: str | None = None,
+        session_id: str | None = None,
+    ) -> bool:
         with self._lock:
-            if generation != self._generation or self._closed.is_set():
+            if (
+                generation != self._generation
+                or self._closed.is_set()
+                or (turn_id is not None and not is_turn_current(session_id, turn_id))
+            ):
+                self._notify(on_complete, False)
                 return False
         values = self._prepare(samples, int(sample_rate))
         import time
 
-        self._queue.put(PlaybackItem(values, int(sample_rate), int(generation), time.perf_counter()))
+        self._queue.put(PlaybackItem(
+            values,
+            int(sample_rate),
+            int(generation),
+            time.perf_counter(),
+            on_complete,
+            str(turn_id) if turn_id is not None else None,
+            str(session_id) if session_id is not None else None,
+        ))
         return True
+
+    def set_reference_sink(self, reference_sink: Any) -> None:
+        self.reference_sink = reference_sink
+
+    def set_playback_start_callback(self, callback: Callable[[], None] | None) -> None:
+        self.playback_start_callback = callback
 
     def interrupt(self) -> int:
         with self._lock:
             self._generation += 1
             stream = self._active_stream
+            latency = self._stream_latency(stream)
+        if self.reference_sink is not None:
+            self.reference_sink.clear_after(time.perf_counter() + latency)
         self._drain()
         if stream is not None:
             try:
@@ -113,34 +153,86 @@ class AudioOutput:
     def _playback_loop(self) -> None:
         stream = None
         stream_rate = None
+        stream_input_rate = None
+        reference_cursor = 0.0
         while True:
             item = self._queue.get()
+            completed = False
             try:
                 if item is None:
                     break
                 with self._lock:
                     current = self._generation
-                if item.generation != current or not item.samples.size:
+                if (
+                    item.generation != current
+                    or not item.samples.size
+                    or (item.turn_id is not None and not is_turn_current(item.session_id, item.turn_id))
+                ):
                     continue
-                if stream is None or stream_rate != item.sample_rate:
+                if stream is None or stream_input_rate != item.sample_rate:
                     if stream is not None:
                         stream.__exit__(None, None, None)
-                    stream = self._make_stream(item.sample_rate)
+                    created_stream = self._make_stream(item.sample_rate)
+                    if isinstance(created_stream, tuple):
+                        stream = created_stream[0]
+                        stream_rate = int(created_stream[1])
+                        output_name = str(created_stream[2]) if len(created_stream) > 2 else "configured output"
+                    else:
+                        stream = created_stream
+                        stream_rate = int(getattr(stream, "samplerate", item.sample_rate) or item.sample_rate)
+                        output_name = "configured output"
                     stream.__enter__()
-                    stream_rate = item.sample_rate
+                    stream_input_rate = item.sample_rate
+                    reference_cursor = time.perf_counter() + self._stream_latency(stream)
                     with self._lock:
                         self._active_stream = stream
-                import time
+                    logging.getLogger("jarvis.voice.audio").info(
+                        "Playback output ready: device=%s input_rate=%s output_rate=%s",
+                        output_name,
+                        item.sample_rate,
+                        stream_rate,
+                    )
+                output_samples = item.samples
+                if stream_rate != item.sample_rate:
+                    import soxr
 
-                import logging
+                    output_samples = np.asarray(
+                        soxr.resample(item.samples, item.sample_rate, stream_rate), dtype=np.float32
+                    )
+                starts_at = max(time.perf_counter() + self._stream_latency(stream), reference_cursor)
+                if self.reference_sink is not None:
+                    self.reference_sink.publish(output_samples, stream_rate, starts_at)
+                reference_cursor = starts_at + output_samples.size / stream_rate
 
                 logging.getLogger("jarvis.voice.audio").info(
-                    "sentence_to_audio_start_ms=%.1f", (time.perf_counter() - item.enqueued_at) * 1000
+                    "sentence_to_audio_start_ms=%.1f samples=%s peak=%.4f",
+                    (time.perf_counter() - item.enqueued_at) * 1000,
+                    output_samples.size,
+                    float(np.max(np.abs(output_samples))) if output_samples.size else 0.0,
                 )
-                stream.write(item.samples.reshape(-1, 1))
+                self._notify_playback_start()
+                stream.write(output_samples.reshape(-1, 1))
+                logging.getLogger("jarvis.voice.audio").info(
+                    "Playback write completed: duration_s=%.2f output_rate=%s",
+                    output_samples.size / stream_rate,
+                    stream_rate,
+                )
+                audible_deadline = time.perf_counter() + self._stream_latency(stream)
+                while time.perf_counter() < audible_deadline:
+                    with self._lock:
+                        still_current = (
+                            item.generation == self._generation
+                            and (item.turn_id is None or is_turn_current(item.session_id, item.turn_id))
+                        )
+                    if not still_current:
+                        break
+                    time.sleep(min(0.01, max(0.0, audible_deadline - time.perf_counter())))
+                with self._lock:
+                    completed = (
+                        item.generation == self._generation
+                        and (item.turn_id is None or is_turn_current(item.session_id, item.turn_id))
+                    )
             except Exception:
-                import logging
-
                 logging.getLogger("jarvis.voice.audio").exception("Playback worker recovered from an audio error")
                 if stream is not None:
                     try:
@@ -149,9 +241,11 @@ class AudioOutput:
                         pass
                     stream = None
                     stream_rate = None
+                    stream_input_rate = None
                     with self._lock:
                         self._active_stream = None
             finally:
+                self._notify(item.on_complete if item is not None else None, completed)
                 self._queue.task_done()
         if stream is not None:
             try:
@@ -166,4 +260,36 @@ class AudioOutput:
             except queue.Empty:
                 break
             else:
+                self._notify(item.on_complete if item is not None else None, False)
                 self._queue.task_done()
+
+    @staticmethod
+    def _stream_latency(stream: Any) -> float:
+        try:
+            latency = getattr(stream, "latency", 0.0)
+            if isinstance(latency, (tuple, list)):
+                latency = latency[-1]
+            return max(0.0, float(latency or 0.0))
+        except (TypeError, ValueError):
+            return 0.0
+
+    @staticmethod
+    def _notify(callback: Callable[[bool], None] | None, completed: bool) -> None:
+        if callback is None:
+            return
+        try:
+            callback(bool(completed))
+        except Exception:
+            import logging
+
+            logging.getLogger("jarvis.voice.audio").exception("Playback completion callback failed")
+
+    def _notify_playback_start(self) -> None:
+        if self.playback_start_callback is None:
+            return
+        try:
+            self.playback_start_callback()
+        except Exception:
+            import logging
+
+            logging.getLogger("jarvis.voice.audio").exception("Playback start callback failed")

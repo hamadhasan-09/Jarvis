@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Any, Iterable, Iterator
 
 from .base_provider import BaseProvider, ProviderError, ProviderResponse, ProviderUnavailable
@@ -79,22 +80,17 @@ class GroqProvider(BaseProvider):
         max_tokens: int | None = None,
         timeout: float | None = None,
         metadata: dict[str, Any] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> Iterator[str]:
-        """Yield text delta strings as the model generates them.
-
-        Falls back to the non-streaming generate() path if the client does not
-        support streaming, so callers never need a try/except around this.
-        """
+        """Yield text deltas and close the active transport when cancelled."""
         if not self.is_configured:
             raise ProviderUnavailable(self.provider_name, "Groq is not configured")
-
         payload = [dict(item) for item in messages]
         if system_prompt:
             if payload and payload[0].get("role") == "system":
                 payload[0]["content"] = system_prompt
             else:
                 payload.insert(0, {"role": "system", "content": system_prompt})
-
         try:
             stream = self.client.chat.completions.create(
                 model=self.model,
@@ -104,13 +100,36 @@ class GroqProvider(BaseProvider):
                 timeout=max(1.0, float(timeout or self.timeout)),
                 stream=True,
             )
-            for chunk in stream:
-                delta = ""
-                if getattr(chunk, "choices", None):
-                    delta = getattr(chunk.choices[0].delta, "content", "") or ""
-                if delta:
-                    yield delta
+            watcher_stop = threading.Event()
+            def close_on_cancel():
+                while not watcher_stop.wait(0.025):
+                    if cancel_event is not None and cancel_event.is_set():
+                        try:
+                            stream.close()
+                        except Exception:
+                            pass
+                        return
+            watcher = threading.Thread(target=close_on_cancel, name="jarvis-groq-cancel", daemon=True)
+            watcher.start()
+            try:
+                for chunk in stream:
+                    if cancel_event is not None and cancel_event.is_set():
+                        return
+                    delta = ""
+                    if getattr(chunk, "choices", None):
+                        delta = getattr(chunk.choices[0].delta, "content", "") or ""
+                    if delta:
+                        yield delta
+            finally:
+                watcher_stop.set()
+                if cancel_event is not None and cancel_event.is_set():
+                    try:
+                        stream.close()
+                    except Exception:
+                        pass
         except ProviderError:
             raise
         except Exception as exc:
+            if cancel_event is not None and cancel_event.is_set():
+                return
             raise ProviderError(self.provider_name, type(exc).__name__ + ": " + str(exc)) from exc

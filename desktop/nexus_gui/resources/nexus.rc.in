@@ -1,0 +1,2 @@
+// The first icon group supplies Nexus.exe's Windows shell/Explorer icon.
+1 ICON "@NEXUS_WINDOWS_ICON@"

@@ -7,11 +7,15 @@ Runs individual steps with the right model and tools
 class Executor:
     """Executes task steps with real tools."""
 
-    def __init__(self, provider_manager, gateway, workspace_dir="."):
+    def __init__(self, provider_manager, gateway, workspace_dir=".", broker=None):
         self.provider_manager = provider_manager
         self.gateway = gateway
         from engine.tools import Toolchain
-        self.toolchain = Toolchain(workspace_dir, approval_gateway=gateway)
+        from security_v2.broker import SecurityBroker
+        from security_v2.key_manager import SecureKeyManager
+
+        self.broker = broker or SecurityBroker(gateway=gateway, key_manager=SecureKeyManager())
+        self.toolchain = Toolchain(workspace_dir, approval_gateway=gateway, broker=self.broker)
 
     def execute_step(self, step, route, context):
         """Execute one step, iterating if tools are used."""

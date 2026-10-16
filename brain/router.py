@@ -11,6 +11,7 @@ import json
 import logging
 import re
 import subprocess
+import threading
 import time
 from typing import Any
 from collections.abc import Callable
@@ -358,6 +359,7 @@ class QalbRouter:
         history: Sequence[dict[str, str]] | None = None,
         on_sentence: Callable[[str], None] | None = None,
         on_reset: Callable[[], None] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> str:
         """Return direct Qalb Urdu, or rewrite the existing brain result in Urdu.
 
@@ -395,6 +397,7 @@ class QalbRouter:
             remember_user=user_text,
             on_sentence=on_sentence,
             on_reset=on_reset,
+            cancel_event=cancel_event,
         )
 
     def _generate_validated(
@@ -405,6 +408,7 @@ class QalbRouter:
         remember_user: str,
         on_sentence: Callable[[str], None] | None = None,
         on_reset: Callable[[], None] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> str:
         if not self.client.health_check():
             raise RuntimeError("Qalb server is unavailable")
@@ -425,6 +429,8 @@ class QalbRouter:
                 sentence_buffer = ""
                 emitted_sentences: list[str] = []
                 for token in self.client.stream_chat(current, max_tokens=int(self.settings.get("max_tokens", 400))):
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise InterruptedError("Qalb generation cancelled by voice barge-in")
                     token = str(token)
                     chunks.append(token)
                     sentence_buffer += token
@@ -448,6 +454,8 @@ class QalbRouter:
                         on_sentence(sentence)
                 raw = "".join(chunks)
             except Exception as exc:
+                if isinstance(exc, InterruptedError):
+                    raise
                 last_error = exc
                 LOG.warning("Qalb request %s failed: %s", attempt + 1, type(exc).__name__)
                 if on_reset is not None and 'emitted_sentences' in locals() and emitted_sentences:
