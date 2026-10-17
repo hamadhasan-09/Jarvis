@@ -16,6 +16,7 @@ import numpy as np
 
 from voice.audio_input import AudioInput
 from voice.audio_output import AudioOutput
+from voice.aec import PlaybackReference, WebRTCAEC
 from voice.config import VoiceConfig, load_config
 from core.contracts import end_turn
 from voice.logging_config import configure_voice_logging
@@ -69,8 +70,20 @@ class VoiceService:
         stt: SpeechToText | None = None,
         tts: Any = None,
         audio_output: Any = None,
+        aec: Any = None,
     ):
         self.config = config or load_config()
+        self._barge_in_requested = bool(self.config.values.get("barge_in", False))
+        self._playback_reference = PlaybackReference() if self._barge_in_requested else None
+        self.aec = aec or (
+            WebRTCAEC(
+                self._playback_reference,
+                stream_delay_ms=int(self.config.section("audio").get("aec_stream_delay_ms", 60)),
+            )
+            if self._playback_reference is not None
+            else None
+        )
+        self._barge_in_active = False
         self.audio_input = audio_input or AudioInput(self.config)
         self.vad = vad or SileroVAD(self.config)
         self.wakeword = wakeword or WakeWord(self.config)
@@ -78,7 +91,11 @@ class VoiceService:
         # The STT-first milestone does not require a separate speech generator.
         self._tts_enabled = tts is not None or bool(self.config.section("tts").get("enabled", True))
         self.tts = tts if tts is not None else (EdgeTTS(self.config) if self._tts_enabled else None)
-        self.audio_output = audio_output or AudioOutput(self.config)
+        self.audio_output = audio_output or AudioOutput(self.config, reference_sink=self._playback_reference)
+        if audio_output is not None and self._playback_reference is not None:
+            setter = getattr(audio_output, "set_reference_sink", None)
+            if callable(setter):
+                setter(self._playback_reference)
         self.state = VoiceState.IDLE
         self._state_lock = threading.RLock()
         self._callbacks: list[Callable[[str, str], Any]] = []
@@ -119,6 +136,17 @@ class VoiceService:
             return
         configure_voice_logging(self.config)
         LOG.info("Loading voice models once for this session")
+        if self._barge_in_requested and self.aec is not None:
+            try:
+                self.aec.load()
+            except Exception as exc:
+                self._barge_in_active = False
+                LOG.warning("Barge-in disabled: WebRTC AEC could not initialize (%s)", type(exc).__name__)
+            else:
+                self._barge_in_active = True
+                LOG.info("Barge-in enabled with reference-signal WebRTC AEC")
+        elif self._barge_in_requested:
+            LOG.warning("Barge-in disabled: AEC implementation is unavailable")
         providers = [("VAD", self.vad), ("wake word", self.wakeword), ("STT", self.stt)]
         if self.tts is not None:
             providers.append(("TTS", self.tts))
@@ -329,9 +357,19 @@ class VoiceService:
                     samples = self._pad_or_trim(samples, frame_samples)
                 if self.current_state in {VoiceState.THINKING, VoiceState.TRANSCRIBING}:
                     continue
-                if self._speaking.is_set() and not bool(self.config.values.get("barge_in", False)):
+                speaking = self._speaking.is_set()
+                if self._aec_active():
+                    try:
+                        capture_time = float(getattr(frame, "captured_at", 0.0) or time.perf_counter())
+                        samples = self.aec.process(samples, capture_time)
+                    except Exception:
+                        LOG.exception("AEC failed during capture; disabling barge-in safely")
+                        self._barge_in_active = False
+                        if speaking:
+                            continue
+                if speaking and not self._barge_in_active:
                     continue
-                if self._speaking.is_set() and bool(self.config.values.get("barge_in", False)):
+                if speaking and self._barge_in_active:
                     if self.vad.probability(samples) > float(settings.get("threshold", 0.5)):
                         self.interrupt()
                     else:
@@ -551,6 +589,9 @@ class VoiceService:
             self._enqueue_speech(notice, lang, self.audio_output.generation)
         except Exception:
             LOG.exception("Could not enqueue the voice error notice")
+
+    def _aec_active(self) -> bool:
+        return bool(self._barge_in_active and self.aec is not None)
 
     def _on_playback_started(self) -> None:
         if self._speaking.is_set():

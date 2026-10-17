@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import os
 import shutil
+import sqlite3
+
+import pytest
 import sys
 import time
 from pathlib import Path
@@ -26,6 +29,55 @@ from web.current_research import WebResearcher  # noqa: E402
 
 
 TEST_ROOT = ROOT / "workspace" / "upgrade_regression_tmp"
+
+@pytest.fixture(autouse=True)
+def synthetic_upgrade_credentials(monkeypatch):
+    import security_v2.key_manager as keys
+
+    monkeypatch.setattr(keys, "load_dotenv", lambda *args, **kwargs: False)
+    monkeypatch.setattr(keys.SecureKeyManager, "get_key", lambda *args, **kwargs: None)
+    monkeypatch.setattr(keys.SecureKeyManager, "_try_keychain", lambda *args, **kwargs: None)
+
+
+# Capture before isolated_auth_server installs its fail-fast database guard.
+_SYNTHETIC_SQLITE_CONNECT = sqlite3.connect
+
+
+@pytest.fixture
+def upgrade_server(isolated_auth_server, monkeypatch, tmp_path):
+    """Use real handlers with disposable storage and a synthetic provider only."""
+    server = isolated_auth_server
+    server.WEB_TOP_K = 5
+    server.KNOWLEDGE_TOP_K = 5
+    temporary_root = tmp_path.resolve()
+
+    def confined_connect(database, *args, **kwargs):
+        target = Path(database).resolve()
+        if not target.is_relative_to(temporary_root):
+            raise AssertionError("Database access outside synthetic upgrade fixture")
+        return _SYNTHETIC_SQLITE_CONNECT(database, *args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", confined_connect)
+    monkeypatch.setattr(sys.modules[__name__], "TEST_ROOT", temporary_root / "upgrade")
+    manager = ProviderManager(
+        project_root=temporary_root,
+        broker=SimpleNamespace(get_credential=lambda *args, **kwargs: None, key_manager=None),
+    )
+    manager.providers = {("groq", "synthetic-model"): FakeProvider("synthetic-model")}
+    server.provider_manager = manager
+    server.task_router = TaskRouter(provider_manager=manager)
+    return server
+
+
+def paired_upgrade_socket(server, http=None):
+    http = http or server.app.test_client()
+    token = server.browser_auth.issue_owner_pairing_token()
+    response = http.post("/auth/pair", json={"token": token},
+                         headers={"X-Nexus-Browser-Auth": "1"})
+    assert response.status_code == 200
+    client = server.socketio.test_client(server.app, flask_test_client=http)
+    assert client.is_connected()
+    return client
 
 
 class FakeProvider(BaseProvider):
@@ -208,22 +260,45 @@ def test_verification_contract():
     assert result["provider"] == "fake"
 
 
-def test_optional_providers_disabled():
-    os.environ["JARVIS_ENABLE_GEMINI"] = "false"
-    os.environ["JARVIS_ENABLE_ANTHROPIC"] = "false"
-    manager = ProviderManager()
+def test_optional_providers_disabled(monkeypatch, tmp_path):
+    import llm.provider_manager as provider_module
+
+    for flag in ("JARVIS_ENABLE_GEMINI", "JARVIS_ENABLE_ANTHROPIC", "JARVIS_ENABLE_EXPERIENTIAL"):
+        monkeypatch.setenv(flag, "false")
+
+    class SyntheticGroq(FakeProvider):
+        provider_name = "groq"
+
+        def __init__(self, api_key, model, timeout):
+            assert api_key == "synthetic-primary-key"
+            super().__init__(model)
+
+    def optional_adapter_must_not_initialize(*args, **kwargs):
+        pytest.fail("Disabled optional provider was initialized")
+
+    monkeypatch.setattr(provider_module, "GroqProvider", SyntheticGroq)
+    for adapter_name in ("GeminiProvider", "AnthropicProvider", "ExperientialProvider"):
+        monkeypatch.setattr(provider_module, adapter_name, optional_adapter_must_not_initialize)
+    broker = SimpleNamespace(get_credential=lambda *args, **kwargs: "synthetic-primary-key", key_manager=None)
+    manager = ProviderManager(project_root=tmp_path, broker=broker)
     names = {item["provider"] for item in manager.status()["configured"]}
     assert "gemini" not in names
     assert "anthropic" not in names
     assert manager.status()["available"] is True
 
 
-def test_empty_web_result_policy():
-    import ui.server as server
+def test_empty_web_result_policy(upgrade_server):
+    server = upgrade_server
 
+    original_memory = server.memory
+    original_knowledge = server.knowledge
+    original_knowledge_enabled = server.KNOWLEDGE_ENABLED
+    original_web_enabled = server.WEB_ENABLED
     root = fresh_root()
-    server.memory = PersistentMemory(project_root=root)
-    server.knowledge = KnowledgeBase(root)
+    test_memory = PersistentMemory(project_root=root)
+    test_knowledge = KnowledgeBase(root)
+    server.memory = test_memory
+    server.knowledge = test_knowledge
     server.KNOWLEDGE_ENABLED = True
     server.WEB_ENABLED = True
     original_web_research = server.web_research
@@ -259,8 +334,9 @@ def test_empty_web_result_policy():
 
     server.provider_manager.generate = fake_generate
     server.provider_manager.stream_generate = fake_stream_generate
+    socket_client = None
     try:
-        socket_client = server.socketio.test_client(server.app)
+        socket_client = paired_upgrade_socket(server)
         socket_client.emit("user_speech", {"text": "search the web for who invented electricity", "request_id": "ordinary"})
         ordinary = [item for item in socket_client.get_received() if item["name"] == "jarvis_reply"][-1]["args"][0]
         assert "test model can answer" in ordinary["text"]
@@ -272,20 +348,35 @@ def test_empty_web_result_policy():
         assert len(captured) == 1
         socket_client.disconnect()
     finally:
+        if socket_client is not None and socket_client.is_connected():
+            socket_client.disconnect()
         server.provider_manager.generate = original_generate
         server.provider_manager.stream_generate = original_stream_generate
-        server.memory.close()
-        server.knowledge.close()
+        test_memory.close()
+        test_knowledge.close()
+        server.memory = original_memory
+        server.knowledge = original_knowledge
+        server.KNOWLEDGE_ENABLED = original_knowledge_enabled
+        server.WEB_ENABLED = original_web_enabled
         server.web_research = original_web_research
         shutil.rmtree(TEST_ROOT, ignore_errors=True)
 
 
-def test_live_http_and_socket_route():
-    import ui.server as server
+def test_live_http_and_socket_route(upgrade_server):
+    server = upgrade_server
 
+    original_memory = server.memory
+    original_knowledge = server.knowledge
+    original_knowledge_enabled = server.KNOWLEDGE_ENABLED
+    original_web_enabled = server.WEB_ENABLED
+    original_verification_enabled = server.task_router.verification_enabled
+    original_verify = server.provider_manager.verify
+    original_generate = server.provider_manager.generate
     root = fresh_root()
-    server.memory = PersistentMemory(project_root=root)
-    server.knowledge = KnowledgeBase(root)
+    test_memory = PersistentMemory(project_root=root)
+    test_knowledge = KnowledgeBase(root)
+    server.memory = test_memory
+    server.knowledge = test_knowledge
     server.KNOWLEDGE_ENABLED = True
     server.WEB_ENABLED = True
     server.task_router.verification_enabled = False
@@ -331,6 +422,7 @@ def test_live_http_and_socket_route():
     server.provider_manager.verify = lambda *args, **kwargs: {
         "performed": False, "passed": None, "provider": None, "model": None, "reason": "disabled"
     }
+    socket_client = None
 
     docs = root / "data" / "knowledge" / "documents"
     docs.mkdir(parents=True, exist_ok=True)
@@ -343,7 +435,7 @@ def test_live_http_and_socket_route():
         assert response.status_code == 200
         assert b"<title>JARVIS</title>" in response.data
 
-        socket_client = server.socketio.test_client(server.app, flask_test_client=client)
+        socket_client = paired_upgrade_socket(server, client)
         assert socket_client.is_connected()
         initial = socket_client.get_received()
         assert any(item["name"] == "system_status" for item in initial)
@@ -390,31 +482,24 @@ def test_live_http_and_socket_route():
         assert "not contain enough information" in insufficient["text"]
         socket_client.disconnect()
     finally:
+        if socket_client is not None and socket_client.is_connected():
+            socket_client.disconnect()
+        server.provider_manager.generate = original_generate
         server.provider_manager.stream_generate = original_stream_generate
-        server.memory.close()
-        server.knowledge.close()
+        server.provider_manager.verify = original_verify
+        test_memory.close()
+        test_knowledge.close()
+        server.memory = original_memory
+        server.knowledge = original_knowledge
+        server.KNOWLEDGE_ENABLED = original_knowledge_enabled
+        server.WEB_ENABLED = original_web_enabled
+        server.task_router.verification_enabled = original_verification_enabled
         server.web_research = original_web_research
         shutil.rmtree(TEST_ROOT, ignore_errors=True)
 
 
 def main():
-    tests = [
-        test_provider_fallback_and_timeout,
-        test_hard_provider_timeout_falls_back,
-        test_task_router_is_deterministic,
-        test_current_questions_route_to_live_web,
-        test_authoritative_current_role_extraction,
-        test_memory_safety_and_explicit_fact_rules,
-        test_document_ingestion_and_bounded_retrieval,
-        test_verification_contract,
-        test_optional_providers_disabled,
-        test_empty_web_result_policy,
-        test_live_http_and_socket_route,
-    ]
-    for test in tests:
-        test()
-        print(f"PASS {test.__name__}")
-    print(f"ALL_UPGRADE_TESTS_PASS {len(tests)}")
+    raise SystemExit(pytest.main([__file__, "-q"]))
 
 
 if __name__ == "__main__":

@@ -206,7 +206,21 @@ def test_provider_manager_resolves_all_provider_keys_through_broker(tmp_path, mo
     monkeypatch.setenv("JARVIS_ENABLE_ANTHROPIC", "true")
     monkeypatch.setenv("JARVIS_ENABLE_EXPERIENTIAL", "true")
 
+    # Verify credential wiring without initializing any real provider SDK.
+    import llm.provider_manager as provider_module
+    adapter_keys = []
+
+    class SyntheticAdapter:
+        def __init__(self, api_key, model, timeout, base_url=None):
+            adapter_keys.append(api_key)
+            self.model = model
+            self.is_configured = api_key == key_manager.key
+
+    for adapter_name in ("GroqProvider", "GeminiProvider", "AnthropicProvider", "ExperientialProvider"):
+        monkeypatch.setattr(provider_module, adapter_name, SyntheticAdapter)
+
     manager = ProviderManager(project_root=tmp_path, broker=broker)
+    assert adapter_keys and all(key == key_manager.key for key in adapter_keys)
 
     assert manager.has_primary is True
     assert set(key_manager.calls) == {"groq", "google", "anthropic", "experiential"}
