@@ -117,8 +117,30 @@ class VoiceService:
         self._reply_lock = threading.RLock()
         self._active_reply_stream: Any = None
         self._played_sentences: dict[str, list[str]] = {}
+        self._speech_threads: set[threading.Thread] = set()
+        self._diagnostic_callbacks: list[Callable[[dict], Any]] = []
         self._last_language = "en"
         self._turn_number = 0
+
+    def on_diagnostic(self, callback: Callable[[dict], Any]) -> None:
+        """Observe local stage/timing codes, never credentials or speech contents."""
+        if not callable(callback):
+            raise TypeError("diagnostic callback must be callable")
+        self._diagnostic_callbacks.append(callback)
+
+    def _diagnostic(self, stage: str, state: str, *, started=None, code=None) -> None:
+        payload = {"stage": stage, "state": state}
+        if started is not None:
+            payload["elapsed_ms"] = round((time.perf_counter()-started)*1000, 3)
+        if code is not None:
+            payload["code"] = code
+        LOG.info("voice_stage=%s state=%s elapsed_ms=%s code=%s",
+                 stage, state, payload.get("elapsed_ms"), code)
+        for callback in tuple(self._diagnostic_callbacks):
+            try:
+                callback(dict(payload))
+            except Exception:
+                LOG.warning("Voice diagnostic callback failed")
 
     def on_transcript(self, callback: Callable[[str, str], Any]) -> None:
         if not callable(callback):
@@ -157,6 +179,7 @@ class VoiceService:
                 except Exception as exc:
                     if name == "wake word" and not self.wakeword.enabled:
                         continue
+                    self._diagnostic("startup", "failed", code=name.lower().replace(" ", "_")+"_unavailable")
                     raise RuntimeError(f"Could not load {name}: {exc}") from exc
         stt_warmup = getattr(self.stt, "warmup", None)
         if self.config.section("stt").get("warmup_on_startup") is True and callable(stt_warmup):
@@ -179,7 +202,11 @@ class VoiceService:
         LOG.info("Voice service started; input mode=%s", self.config.section("input").get("mode"))
 
     def stop(self) -> None:
+        started = time.perf_counter()
+        self._diagnostic("shutdown", "started")
         self._running.clear()
+        # Cancel the reply iterator before joining consumers blocked on it.
+        self.interrupt()
         self.audio_input.stop()
         self.audio_output.close()
         for target in (self._stt_queue, self._tts_queue):
@@ -189,6 +216,11 @@ class VoiceService:
                 pass
         for thread in (self._capture_thread, self._stt_thread, self._tts_thread):
             if thread and thread is not threading.current_thread():
+                thread.join(timeout=3)
+        with self._reply_lock:
+            feeders = list(self._speech_threads)
+        for thread in feeders:
+            if thread is not threading.current_thread():
                 thread.join(timeout=3)
         for provider in (self.stt, self.tts):
             if provider is None:
@@ -200,6 +232,10 @@ class VoiceService:
                 except Exception:
                     LOG.exception("Voice provider shutdown failed")
         self._set_state(VoiceState.STOPPED)
+        pending = [thread for thread in (self._capture_thread, self._stt_thread, self._tts_thread, *feeders)
+                   if thread and thread.is_alive()]
+        self._diagnostic("shutdown", "pending" if pending else "complete", started=started,
+                         code="worker_not_stopped" if pending else None)
 
     def speak(self, text: str, lang: str, interrupt: bool = False) -> None:
         if not self._tts_enabled:
@@ -211,13 +247,30 @@ class VoiceService:
         self._enqueue_speech(text, lang, generation)
 
     def speak_stream(self, sentence_iterator: Iterable[str], lang: str) -> None:
+        with self._reply_lock:
+            accepted = self._running.is_set()
+            if accepted:
+                self._active_reply_stream = sentence_iterator
+        if not accepted:
+            cancel = getattr(sentence_iterator, "cancel", None)
+            if callable(cancel):
+                cancel("")
+            return
         if not self._tts_enabled:
-            for _sentence in sentence_iterator:
-                pass
-            session_id = getattr(sentence_iterator, "session_id", None)
-            turn_id = getattr(sentence_iterator, "turn_id", None)
-            if session_id and turn_id:
-                end_turn(session_id, turn_id)
+            with self._reply_lock:
+                self._active_reply_stream = sentence_iterator
+            try:
+                for _sentence in sentence_iterator:
+                    if not self._running.is_set():
+                        break
+            finally:
+                session_id = getattr(sentence_iterator, "session_id", None)
+                turn_id = getattr(sentence_iterator, "turn_id", None)
+                if session_id and turn_id:
+                    end_turn(session_id, turn_id)
+                with self._reply_lock:
+                    if self._active_reply_stream is sentence_iterator:
+                        self._active_reply_stream = None
             return
         generation = self.audio_output.generation
         reply_request_id = getattr(sentence_iterator, "request_id", None)
@@ -231,6 +284,7 @@ class VoiceService:
         def feed() -> None:
             nonlocal reply_session_id, reply_turn_id
             current_generation = generation
+            started = time.perf_counter()
             try:
                 for sentence in sentence_iterator:
                     if not self._running.is_set() or current_generation != self.audio_output.generation:
@@ -261,19 +315,32 @@ class VoiceService:
                         session_id=reply_session_id,
                         turn_id=reply_turn_id,
                     )
-            except Exception:
-                LOG.exception("Reply sentence stream failed")
+                cancelled = getattr(sentence_iterator, "state", {}).get("cancelled")
+                state = "cancelled" if (cancelled is not None and cancelled.is_set()) or not self._running.is_set() else "complete"
+                self._diagnostic("brain", state, started=started)
+            except Exception as exc:
+                self._diagnostic("brain", "failed", started=started,
+                                 code=getattr(exc, "code", type(exc).__name__))
+                LOG.warning("Reply sentence stream failed: %s", type(exc).__name__)
             finally:
                 reply_session_id = getattr(sentence_iterator, "session_id", reply_session_id) or reply_session_id
                 reply_turn_id = getattr(sentence_iterator, "turn_id", reply_turn_id) or reply_turn_id
-                self._queue_end(
-                    current_generation,
-                    str(reply_request_id) if reply_request_id else None,
-                    session_id=reply_session_id,
-                    turn_id=reply_turn_id,
-                )
+                try:
+                    if self._running.is_set():
+                        self._queue_end(
+                            current_generation,
+                            str(reply_request_id) if reply_request_id else None,
+                            session_id=reply_session_id,
+                            turn_id=reply_turn_id,
+                        )
+                finally:
+                    with self._reply_lock:
+                        self._speech_threads.discard(threading.current_thread())
 
-        threading.Thread(target=feed, name="jarvis-speech-stream", daemon=True).start()
+        worker = threading.Thread(target=feed, name="jarvis-speech-stream", daemon=True)
+        with self._reply_lock:
+            self._speech_threads.add(worker)
+            worker.start()
 
     def interrupt(self, *, cancel_reply: bool = True) -> int:
         with self._reply_lock:
@@ -283,7 +350,10 @@ class VoiceService:
             turn_id = getattr(reply_stream, "turn_id", None) if reply_stream is not None else None
         if cancel_reply and session_id and turn_id:
             end_turn(session_id, turn_id)
-        generation = self.audio_output.interrupt()
+        interrupt_output = getattr(self.audio_output, "interrupt", None)
+        generation = interrupt_output() if callable(interrupt_output) else int(
+            getattr(self.audio_output, "generation", 0)
+        )
         while True:
             try:
                 item = self._tts_queue.get_nowait()
@@ -435,7 +505,9 @@ class VoiceService:
                 if turn is None:
                     return
                 started = time.perf_counter()
+                self._diagnostic("stt", "started")
                 result: TranscriptResult | None = self.stt.transcribe(turn.samples, sample_rate=16000)
+                self._diagnostic("stt", "complete" if result else "rejected", started=started)
                 if result is None or not result.text.strip():
                     LOG.info("STT rejected silent, low-confidence, or hallucinated audio")
                     self._set_state(VoiceState.LISTENING)
@@ -451,23 +523,21 @@ class VoiceService:
                 self._set_state(VoiceState.THINKING)
                 for callback in tuple(self._callbacks):
                     try:
+                        self._diagnostic("brain", "submitted")
                         callback_result = callback(result.text, result.lang)
-                        if not self._tts_enabled and isinstance(callback_result, Iterable) and not isinstance(callback_result, (str, bytes)):
-                            # Drain the bridge iterator so its async brain request
-                            # completes and releases its per-request state.
-                            for _item in callback_result:
-                                pass
-                        elif isinstance(callback_result, str) and callback_result.strip():
+                        if isinstance(callback_result, str) and callback_result.strip():
                             self.speak(callback_result, result.lang)
                         elif callback_result is not None and isinstance(callback_result, Iterable):
                             self.speak_stream(callback_result, result.lang)
-                    except Exception:
-                        LOG.exception("Brain transcript callback failed")
+                    except Exception as exc:
+                        self._diagnostic("brain", "failed", code=getattr(exc, "code", type(exc).__name__))
+                        LOG.warning("Brain transcript callback failed: %s", type(exc).__name__)
                         self._speak_error(result.lang)
                 if not self._tts_enabled and self.current_state == VoiceState.THINKING:
                     self._set_state(VoiceState.LISTENING)
-            except Exception:
-                LOG.exception("STT worker recovered from a turn failure")
+            except Exception as exc:
+                self._diagnostic("stt", "failed", code=type(exc).__name__)
+                LOG.warning("STT worker recovered from a turn failure: %s", type(exc).__name__)
                 self._set_state(VoiceState.LISTENING)
                 self._speak_error(self._last_language)
             finally:
@@ -529,21 +599,25 @@ class VoiceService:
             try:
                 if job is None:
                     return
+                if job.generation != self.audio_output.generation:
+                    continue
                 if job.end_of_stream:
-                    self.audio_output.wait_empty(timeout=float(self.config.section("brain").get("qalb", {}).get("timeout_s", 30)) + 120.0)
+                    drained = self.audio_output.wait_empty(timeout=float(self.config.section("brain").get("qalb", {}).get("timeout_s", 30)) + 120.0)
+                    self._diagnostic("playback", "drained" if drained else "failed",
+                                     code=None if drained else "playback_timeout")
                     self._speaking.clear()
                     self._set_state(VoiceState.LISTENING)
                     if job.reply_request_id:
                         with self._reply_lock:
                             if getattr(self._active_reply_stream, "request_id", None) == job.reply_request_id:
                                 self._active_reply_stream = None
+                            self._played_sentences.pop(job.reply_request_id, None)
                     if job.session_id and job.turn_id:
                         end_turn(job.session_id, job.turn_id)
                     continue
-                if job.generation != self.audio_output.generation:
-                    continue
                 started = time.perf_counter()
                 waveform = self.tts.synthesize(job.text, job.lang)
+                self._diagnostic("tts", "ready", started=started)
                 LOG.info("sentence_to_audio_ready_ms=%.1f lang=%s", (time.perf_counter() - started) * 1000, job.lang)
                 if job.generation != self.audio_output.generation:
                     continue
@@ -575,8 +649,9 @@ class VoiceService:
                         job.generation,
                         **self._audio_turn_kwargs(job),
                     )
-            except Exception:
-                LOG.exception("TTS worker recovered from a sentence failure")
+            except Exception as exc:
+                self._diagnostic("tts", "failed", code=type(exc).__name__)
+                LOG.warning("TTS worker recovered from a sentence failure: %s", type(exc).__name__)
             finally:
                 self._tts_queue.task_done()
 
@@ -593,10 +668,13 @@ class VoiceService:
         return bool(self._barge_in_active and self.aec is not None)
 
     def _on_playback_started(self) -> None:
+        self._diagnostic("playback", "started")
         if self._speaking.is_set():
             self._set_state(VoiceState.SPEAKING)
 
     def _playback_completed(self, request_id: str, text: str, played: bool) -> None:
+        self._diagnostic("playback", "complete" if played else "failed",
+                         code=None if played else "playback_not_completed")
         if played:
             with self._reply_lock:
                 self._played_sentences.setdefault(request_id, []).append(text)

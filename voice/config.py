@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +25,8 @@ class VoiceConfig:
 
 
 def load_config(path: str | Path | None = None) -> VoiceConfig:
-    config_path = Path(path) if path else Path(__file__).resolve().parents[1] / "voice_config.yaml"
+    selected = path if path is not None else os.getenv("NEXUS_VOICE_CONFIG")
+    config_path = Path(selected).expanduser() if selected else Path(__file__).resolve().parents[1] / "voice_config.yaml"
     if not config_path.is_file():
         raise VoiceConfigError(f"Voice configuration not found: {config_path}")
     try:
