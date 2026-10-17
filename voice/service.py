@@ -22,7 +22,7 @@ from core.contracts import end_turn
 from voice.logging_config import configure_voice_logging
 from voice.stt import SpeechToText, TranscriptResult, WhisperEngine
 from voice.text_cleaner import split_sentences
-from voice.tts import EdgeTTS
+from voice.local_tts import create_tts_backend
 from voice.vad import SileroVAD
 from voice.wakeword import WakeWord
 
@@ -88,9 +88,8 @@ class VoiceService:
         self.vad = vad or SileroVAD(self.config)
         self.wakeword = wakeword or WakeWord(self.config)
         self.stt = stt if stt is not None else WhisperEngine(self.config)
-        # The STT-first milestone does not require a separate speech generator.
         self._tts_enabled = tts is not None or bool(self.config.section("tts").get("enabled", True))
-        self.tts = tts if tts is not None else (EdgeTTS(self.config) if self._tts_enabled else None)
+        self.tts = tts if tts is not None else (create_tts_backend(self.config) if self._tts_enabled else None)
         self.audio_output = audio_output or AudioOutput(self.config, reference_sink=self._playback_reference)
         if audio_output is not None and self._playback_reference is not None:
             setter = getattr(audio_output, "set_reference_sink", None)
@@ -155,16 +154,16 @@ class VoiceService:
             if callable(loader):
                 try:
                     loader()
-                except Exception:
+                except Exception as exc:
                     if name == "wake word" and not self.wakeword.enabled:
                         continue
-                    raise RuntimeError(f"Could not load {name}: see the preceding error")
+                    raise RuntimeError(f"Could not load {name}: {exc}") from exc
         stt_warmup = getattr(self.stt, "warmup", None)
-        if callable(stt_warmup):
+        if self.config.section("stt").get("warmup_on_startup") is True and callable(stt_warmup):
             stt_warmup()
         if self.tts is not None:
             warmup = getattr(self.tts, "warmup", None)
-            if callable(warmup):
+            if self.config.section("tts").get("warmup_on_startup") is True and callable(warmup):
                 warmup()
             self.audio_output.start()
         self._running.set()

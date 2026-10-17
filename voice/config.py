@@ -52,7 +52,7 @@ def _validate(values: dict[str, Any], path: Path) -> None:
     input_cfg = values["input"]
     tts = values["tts"]
     brain = values["brain"]
-    for key in ("model", "fallback_model", "device", "compute_type"):
+    for key in ("model", "device", "compute_type"):
         if not str(stt.get(key, "")).strip():
             errors.append(f"'stt.{key}' must be non-empty")
     if int(stt.get("beam_size", 0)) < 1:

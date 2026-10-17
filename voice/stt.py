@@ -1,4 +1,4 @@
-"""Groq Whisper transcription with a lazy local faster-whisper fallback."""
+"""Local-first, offline-only Faster-Whisper with explicitly opted-in Groq STT."""
 
 from __future__ import annotations
 
@@ -45,11 +45,7 @@ class SpeechToText(Protocol):
 
 
 class WhisperEngine:
-    """Groq Whisper API with a lazy faster-whisper CPU fallback.
-
-    The public class name stays stable for existing Nexus imports. The local
-    model is not initialized until the Groq transcription call raises.
-    """
+    """Preserve the existing STT contract while selecting one configured provider."""
 
     def __init__(self, config: VoiceConfig | None = None, *, model=None, model_factory=None, groq_client=None):
         self.config = config or load_config()
@@ -57,20 +53,23 @@ class WhisperEngine:
         self._model = model
         self._model_factory = model_factory
         self._groq_client = groq_client
-        self._device = "cpu"
+        self.provider = str(self.settings.get("provider", "faster-whisper")).strip().lower()
+        if self.provider not in {"faster-whisper", "groq"}:
+            raise ValueError(f"Unsupported STT provider: {self.provider}")
+        if self.provider == "groq" and self.settings.get("online_enabled") is not True:
+            raise ValueError("Groq STT requires explicit stt.online_enabled: true")
+        self._device = str(self.settings.get("device", "cpu"))
+        self.compute_type = str(self.settings.get("compute_type", "int8"))
+        self._model_name = str(self.settings.get("model", "large-v3"))
         self.primary_model_name = str(self.settings.get("groq_model", "whisper-large-v3-turbo"))
-        self.fallback_model_name = str(self.settings.get("fallback_model", "base.en"))
         self.vocabulary_hint = str(self.settings.get("vocabulary_hint", "")).strip()
-        self._model_name = self.fallback_model_name
-        self.runtime_reason = "Groq primary; local fallback not loaded"
+        self.runtime_reason = f"Configured {self.provider}; local weights loaded only on demand"
 
     def load(self) -> None:
-        """Keep startup light; neither call the API nor load local weights."""
-        LOG.info(
-            "STT configured: provider=groq model=%s; fallback=faster-whisper/%s cpu int8 (lazy)",
-            self.primary_model_name,
-            self.fallback_model_name,
-        )
+        """No model loading, download, or cloud request during ordinary startup."""
+        LOG.info("STT configured: provider=%s model=%s device=%s compute_type=%s (lazy)",
+                 self.provider, self._model_name if self.provider == "faster-whisper" else self.primary_model_name,
+                 self._device, self.compute_type)
 
     def _create_model(self, name: str, device: str, compute: str):
         if self._model_factory:
@@ -78,23 +77,40 @@ class WhisperEngine:
         try:
             from faster_whisper import WhisperModel
         except ImportError as exc:
-            raise RuntimeError("Local STT fallback requires faster-whisper") from exc
-        return WhisperModel(name, device=device, compute_type=compute)
+            raise RuntimeError("Local STT requires faster-whisper") from exc
+        from pathlib import Path
+        from faster_whisper.utils import download_model
+        # Resolve from disk/cache only before construction: WhisperModel otherwise
+        # fetches a default tokenizer when tokenizer.json is absent, even with
+        # local_files_only=True. Reject incomplete local models instead.
+        model_path = Path(name)
+        if not model_path.is_dir():
+            model_path = Path(download_model(name, local_files_only=True))
+        for required in ("model.bin", "config.json", "tokenizer.json"):
+            if not (model_path / required).is_file():
+                raise FileNotFoundError(f"Local Whisper model is incomplete: {model_path / required}")
+        return WhisperModel(str(model_path), device=device, compute_type=compute, local_files_only=True)
 
-    def _load_fallback(self, reason: str = "Groq request failed") -> None:
+    def _load_local(self) -> None:
         if self._model is not None:
             return
-        name = self.fallback_model_name
+        name = str(self.settings.get("model_path") or self._model_name)
+        if self.settings.get("model_path"):
+            from pathlib import Path
+            path = Path(name).expanduser()
+            name = str(path if path.is_absolute() else self.config.path.parent / path)
         try:
-            self._model = self._create_model(name, "cpu", "int8")
-            self._model_name, self._device = name, "cpu"
-            self.runtime_reason = reason
-            LOG.info(
-                "STT fallback loaded: provider=faster-whisper model=%s device=cpu compute_type=int8",
-                name,
-            )
+            self._model = self._create_model(name, self._device, self.compute_type)
         except Exception as exc:
-            raise RuntimeError(f"Could not load local faster-whisper fallback ({name}): {exc}") from exc
+            raise RuntimeError(
+                f"Local Faster-Whisper {self._model_name} unavailable ({type(exc).__name__}). "
+                "Install the configured CTranslate2 model in the local cache or set stt.model_path; "
+                "downloads and model substitution are disabled."
+            ) from exc
+
+    def _language(self) -> str | None:
+        value = str(self.settings.get("language") or "auto").strip().lower()
+        return None if value == "auto" else value
 
     def transcribe(self, audio: np.ndarray | bytes, *, sample_rate: int = 16000) -> TranscriptResult | None:
         started = time.perf_counter()
@@ -102,11 +118,9 @@ class WhisperEngine:
         if values.size < int(sample_rate * float(self.config.section("vad").get("min_speech_ms", 300)) / 1000):
             return None
         values = self._to_16khz(values, sample_rate)
-        try:
+        if self.provider == "groq":
             return self._transcribe_groq(values, started)
-        except Exception as exc:
-            LOG.warning("Groq STT failed (%s); using faster-whisper CPU fallback", type(exc).__name__)
-            return self._transcribe_local(values, started)
+        return self._transcribe_local(values, started)
 
     def _get_groq_client(self):
         if self._groq_client is None:
@@ -122,8 +136,8 @@ class WhisperEngine:
             "file": ("speech.wav", self._wav_bytes(values)),
             "model": self.primary_model_name,
         }
-        language = str(self.settings.get("language", "en")).strip().lower()
-        if language and language != "auto":
+        language = self._language()
+        if language:
             options["language"] = language
         if self.vocabulary_hint:
             options["prompt"] = self.vocabulary_hint
@@ -171,34 +185,31 @@ class WhisperEngine:
         return buffer.getvalue()
 
     def _transcribe_local(self, values: np.ndarray, started: float) -> TranscriptResult | None:
-        self._load_fallback()
+        self._load_local()
         try:
-            segments, info = self._run(values, language="en", initial_prompt=self.vocabulary_hint or None)
+            segments, info = self._run(values, language=self._language(), initial_prompt=self.vocabulary_hint or None)
         except Exception as exc:
-            raise RuntimeError(f"Groq and local faster-whisper transcription failed: {exc}") from exc
-        result = self._result_from_segments(segments, "en", info, 16000, started)
-        duration_ms = (time.perf_counter() - started) * 1000.0
-        LOG.info(
-            "STT provider=faster-whisper model=%s device=cpu compute_type=int8 language=en transcription_ms=%.1f",
-            self.fallback_model_name,
-            duration_ms,
-        )
+            raise RuntimeError(f"Local faster-whisper transcription failed: {type(exc).__name__}") from exc
+        language = self._language() or str(getattr(info, "language", "") or "und").lower()
+        result = self._result_from_segments(segments, language, info, 16000, started)
+        LOG.info("STT provider=faster-whisper model=%s device=%s compute_type=%s language=%s transcription_ms=%.1f",
+                 self._model_name, self._device, self.compute_type, language, (time.perf_counter()-started)*1000)
         return result
 
     def warmup(self) -> None:
-        """Explicitly warm the local fallback only when requested by an operator."""
-        silence = np.zeros(16000, dtype=np.float32)
-        self._load_fallback("explicit local fallback warmup")
-        self._run(silence, language="en")
+        """Only explicitly requested local warmup loads weights; never call a cloud API."""
+        if self.provider == "faster-whisper":
+            self._load_local()
+            self._run(np.zeros(16000, dtype=np.float32), language=self._language())
 
     def _run(self, values: np.ndarray, *, language: str | None, initial_prompt: str | None = None):
         options: dict[str, Any] = {
             "language": language,
             "task": "transcribe",
-            "beam_size": 1,
+            "beam_size": int(self.settings.get("beam_size", 1)),
             "vad_filter": bool(self.settings.get("vad_filter", True)),
-            "condition_on_previous_text": False,
-            "temperature": 0.0,
+            "condition_on_previous_text": bool(self.settings.get("condition_on_previous_text", False)),
+            "temperature": self.settings.get("temperatures", [0.0]),
             "no_speech_threshold": float(self.settings.get("no_speech_threshold", 0.6)),
         }
         if initial_prompt:

@@ -37,13 +37,14 @@ def test_voice_config_defaults_and_pending_qalb_path():
     config = load_config()
     assert config.section("input")["target_sample_rate"] == 16000
     stt = config.section("stt")
-    assert stt["provider"] == "groq"
+    assert stt["provider"] == "faster-whisper"
     assert stt["groq_model"] == "whisper-large-v3-turbo"
-    assert stt["language"] == "en"
-    assert stt["model"] == "whisper-large-v3-turbo"
-    assert stt["fallback_model"] == "base.en"
-    assert stt["fallback_device"] == "cpu"
-    assert stt["fallback_compute_type"] == "int8"
+    assert stt["language"] == "auto"
+    assert stt["model"] == "large-v3"
+    assert stt["device"] == "cpu"
+    assert stt["compute_type"] == "int8"
+    assert stt["online_enabled"] is False
+    assert stt["warmup_on_startup"] is False
     assert config.section("brain")["qalb"]["mode"] == "hybrid"
     assert config.section("brain")["qalb"]["model_path"] == (
         r"C:\Users\Hammad\Desktop\Nexus\models\qalb\Qalb-1.0-8B-Instruct.Q4_K_M.gguf"
@@ -311,7 +312,7 @@ def test_whisper_engine_implements_backend_neutral_contract():
     assert WhisperSTT is WhisperEngine
 
 
-def test_voice_service_uses_groq_primary_and_small_en_fallback_by_default():
+def test_voice_service_uses_lazy_local_whisper_and_piper_by_default():
     service = VoiceService(
         config=load_config(),
         audio_input=object(),
@@ -320,8 +321,12 @@ def test_voice_service_uses_groq_primary_and_small_en_fallback_by_default():
         audio_output=object(),
     )
     assert isinstance(service.stt, WhisperEngine)
-    assert service.stt.primary_model_name == "whisper-large-v3-turbo"
-    assert service.stt.fallback_model_name == "base.en"
+    assert service.stt.provider == "faster-whisper"
+    assert service.stt._model_name == "large-v3"
+    assert service.stt._model is None
+    from voice.local_tts import PiperTTS
+    assert isinstance(service.tts, PiperTTS)
+    assert service.tts._voices == {}
 def test_fast_voice_default_and_claude_reasoning_routes_are_separate(monkeypatch):
     monkeypatch.setenv("JARVIS_PRIMARY_PROVIDER", "groq")
     monkeypatch.setenv("JARVIS_PRIMARY_MODEL", "openai/gpt-oss-20b")
@@ -378,7 +383,7 @@ def test_groq_primary_sends_mono_16khz_wav_without_loading_fallback(caplog):
     transcriptions = FakeGroqTranscriptions()
     created = []
     stt = WhisperEngine(
-        load_config(),
+        _config(stt={"provider": "groq", "online_enabled": True, "language": "en"}),
         groq_client=_fake_groq_client(transcriptions),
         model_factory=lambda *args: created.append(args) or object(),
     )
@@ -400,36 +405,24 @@ def test_groq_primary_sends_mono_16khz_wav_without_loading_fallback(caplog):
     assert "transcription_ms=" in caplog.text
 
 
-def test_groq_exception_uses_small_en_cpu_int8_fallback(caplog):
-    caplog.set_level("INFO", logger="jarvis.voice.stt")
+def test_groq_exception_is_not_a_silent_provider_or_model_fallback():
     transcriptions = FakeGroqTranscriptions(error=OSError("offline"))
     created = []
-
-    class FakeModel:
-        def transcribe(self, values, **options):
-            assert options["language"] == "en"
-            assert options["beam_size"] == 1
-            segment = SimpleNamespace(text=" Local fallback works. ", avg_logprob=-0.1)
-            info = SimpleNamespace(language="en", language_probability=0.9)
-            return [segment], info
-
-    def model_factory(name, device, compute_type):
-        created.append((name, device, compute_type))
-        return FakeModel()
-
-    stt = WhisperEngine(load_config(), groq_client=_fake_groq_client(transcriptions), model_factory=model_factory)
-    result = stt.transcribe(np.full(16000, 0.02, dtype=np.float32))
-    assert result.text == "Local fallback works."
-    assert created == [("base.en", "cpu", "int8")]
-    assert "Groq STT failed (OSError)" in caplog.text
-    assert "provider=faster-whisper model=base.en device=cpu compute_type=int8" in caplog.text
+    stt = WhisperEngine(
+        _config(stt={"provider": "groq", "online_enabled": True}),
+        groq_client=_fake_groq_client(transcriptions),
+        model_factory=lambda *args: created.append(args),
+    )
+    with pytest.raises(OSError, match="offline"):
+        stt.transcribe(np.full(16000, 0.02, dtype=np.float32))
+    assert created == []
 
 
 def test_empty_groq_transcript_does_not_load_local_fallback():
     transcriptions = FakeGroqTranscriptions(text="")
     created = []
     stt = WhisperEngine(
-        load_config(),
+        _config(stt={"provider": "groq", "online_enabled": True, "language": "en"}),
         groq_client=_fake_groq_client(transcriptions),
         model_factory=lambda *args: created.append(args) or object(),
     )
@@ -440,7 +433,7 @@ def test_empty_groq_transcript_does_not_load_local_fallback():
 def test_groq_transcription_logs_provider_model_and_elapsed_time(caplog):
     caplog.set_level("INFO", logger="jarvis.voice.stt")
     transcriptions = FakeGroqTranscriptions(text="Timed transcript.")
-    stt = WhisperEngine(load_config(), groq_client=_fake_groq_client(transcriptions))
+    stt = WhisperEngine(_config(stt={"provider": "groq", "online_enabled": True, "language": "en"}), groq_client=_fake_groq_client(transcriptions))
     result = stt.transcribe(np.full(16000, 0.02, dtype=np.float32))
     assert result.text == "Timed transcript."
     assert result.duration_ms >= 0

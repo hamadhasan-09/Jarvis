@@ -35,12 +35,18 @@ def _decode_mp3(source: str | io.BytesIO, sample_rate: int) -> np.ndarray:
     return np.concatenate(decoded) if decoded else np.zeros(0, dtype=np.float32)
 
 
+# Older local adapters import the format-neutral decoder name.
+_decode_audio = _decode_mp3
+
+
 class EdgeTTS:
     """Synthesize Edge neural speech into the PCM format used by AudioOutput."""
 
     def __init__(self, config: VoiceConfig | None = None, *, elevenlabs: ElevenLabsTTS | None = None):
         self.config = config or load_config()
         self.settings = self.config.section("tts")
+        if self.settings.get("online_enabled") is not True:
+            raise RuntimeError("Edge TTS requires explicit tts.online_enabled: true")
         voices = self.settings.get("voices", {})
         self.voices = {
             "en": str(voices.get("en", "en-GB-RyanNeural")),
@@ -168,7 +174,7 @@ class ElevenLabsTTS:
         self.config = config or load_config()
         self.tts_settings = self.config.section("tts")
         self.settings = self.tts_settings.get("elevenlabs", {})
-        self.enabled = bool(self.settings.get("enabled", False))
+        self.enabled = self.settings.get("enabled") is True
         self.voice_id = str(self.settings.get("voice_id", "")).strip()
         self.model_id = str(self.settings.get("model_id", "")).strip()
         self.sample_rate = int(self.config.section("tts").get("sample_rate", 24000))
@@ -220,8 +226,9 @@ class ElevenLabsTTS:
 
     def _request_audio(self, sentence: str) -> bytes | None:
         try:
-            if not self.enabled:
-                LOG.debug("ElevenLabs is disabled in config; skipping")
+            if (self.tts_settings.get("online_enabled") is not True
+                    or self.settings.get("enabled") is not True):
+                LOG.debug("ElevenLabs requires both global online and provider opt-in; skipping")
                 return None
             if not self.voice_id or not self.model_id:
                 LOG.warning("ElevenLabs voice_id/model_id are missing from tts.elevenlabs configuration")

@@ -1,110 +1,78 @@
-"""Manual end-to-end voice hardware/model diagnostic: python -m voice.selftest."""
+"""Standalone offline diagnostics: python -m voice.selftest --help.
 
+Each invocation tests one local adapter using files only. No Nexus server, LLM,
+microphone, playback device, or cloud fallback is involved. Models load only
+when a fully specified diagnostic is explicitly executed.
+"""
 from __future__ import annotations
 
-import sys
+import argparse
+from copy import deepcopy
+from pathlib import Path
 import time
+import wave
 
 import numpy as np
 
-from voice.audio_input import AudioInput
-from voice.audio_output import AudioOutput
-from voice.config import load_config
-from voice.stt import WhisperSTT
-from voice.tts import IndicParlerTTS
+from voice.config import VoiceConfig, load_config
+from voice.local_tts import PiperTTS
+from voice.stt import WhisperEngine
 
 
-def _report(name: str, started: float, error: Exception | None = None, detail: str = "") -> bool:
-    duration = (time.perf_counter() - started) * 1000
-    status = "PASS" if error is None else "FAIL"
-    print(f"{status} {name}: {duration:.0f} ms" + (f" — {detail}" if detail else "") + (f" — {error}" if error else ""), flush=True)
-    return error is None
-
-
-def main() -> int:
-    config = load_config()
-    passed = True
-    recorded: np.ndarray | None = None
-    devices_ok = False
-    started = time.perf_counter()
-    try:
-        import sounddevice as sd
-
-        inputs = [f"{index}: {item['name']} (in={item['max_input_channels']}, rate={item['default_samplerate']})" for index, item in enumerate(sd.query_devices()) if item.get("max_input_channels", 0) > 0]
-        outputs = [f"{index}: {item['name']} (out={item['max_output_channels']}, rate={item['default_samplerate']})" for index, item in enumerate(sd.query_devices()) if item.get("max_output_channels", 0) > 0]
-        print("INPUT DEVICES\n" + ("\n".join(inputs) or "(none)"))
-        print("OUTPUT DEVICES\n" + ("\n".join(outputs) or "(none)"))
-        devices_ok = bool(inputs and outputs)
-        passed &= _report("audio device inventory", started, None if devices_ok else RuntimeError("input or output device missing"))
-    except Exception as exc:
-        passed &= _report("audio device inventory", started, exc)
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--provider", required=True, choices=("piper", "whisper"))
+    parser.add_argument("--config", type=Path, help="Voice YAML, including existing absolute model paths")
+    parser.add_argument("--input", type=Path, help="Whisper input: mono 16-bit PCM WAV")
+    parser.add_argument("--output", type=Path, help="Piper output: WAV file (never played)")
+    parser.add_argument("--text", help="Piper text; defaults to a short phrase in the selected language")
+    parser.add_argument("--language", choices=("en", "ur"), default="en", help="Piper language; Whisper honors stt.language in YAML")
+    args = parser.parse_args(argv)
+    if args.provider == "whisper" and (args.input is None or not args.input.is_file()):
+        parser.error("Whisper requires --input pointing to an existing PCM WAV file")
+    if args.provider == "piper" and args.output is None:
+        parser.error("Piper requires --output for its WAV file")
 
     started = time.perf_counter()
+    adapter = None
     try:
-        capture = AudioInput(config)
-        chunks: list[np.ndarray] = []
-        required = int(3 * int(config.section("input").get("target_sample_rate", 16000)))
-        total = 0
-        for frame in capture.frames():
-            chunks.append(frame.samples.copy())
-            total += frame.samples.size
-            if total >= required:
-                capture.stop()
-                break
-        recorded = np.concatenate(chunks)[:required] if chunks else np.empty(0, dtype=np.float32)
-        if recorded.size < required:
-            raise RuntimeError(f"recorded only {recorded.size} samples")
-        passed &= _report("3-second microphone capture and resampling", started)
+        config = load_config(args.config)
+        values = deepcopy(config.values)
+        # A diagnostic selecting a local adapter must stay local even when the
+        # application config explicitly opts into cloud providers.
+        section = "tts" if args.provider == "piper" else "stt"
+        values[section].update(provider="piper" if section == "tts" else "faster-whisper", online_enabled=False)
+        config = VoiceConfig(values, config.path)
+        if args.provider == "piper":
+            adapter = PiperTTS(config)
+            text = args.text if args.text is not None else ("سلام۔ آواز کا ٹیسٹ مکمل ہوا۔" if args.language == "ur" else "Hello. Voice check complete.")
+            samples = adapter.synthesize(text, args.language)
+            pcm = (np.clip(samples, -1.0, 1.0) * 32767).astype("<i2")
+            with wave.open(str(args.output), "wb") as output:
+                output.setnchannels(1)
+                output.setsampwidth(2)
+                output.setframerate(adapter.sample_rate)
+                output.writeframes(pcm.tobytes())
+            detail = f"language={args.language} samples={samples.size} rate={adapter.sample_rate} output={args.output}"
+        else:
+            with wave.open(str(args.input), "rb") as source:
+                if source.getnchannels() != 1 or source.getsampwidth() != 2 or source.getcomptype() != "NONE":
+                    raise ValueError("Whisper input must be mono, uncompressed 16-bit PCM WAV")
+                rate = source.getframerate()
+                samples = np.frombuffer(source.readframes(source.getnframes()), dtype="<i2").astype(np.float32) / 32768
+            adapter = WhisperEngine(config)
+            result = adapter.transcribe(samples, sample_rate=rate)
+            if result is None:
+                raise RuntimeError("Whisper returned no accepted transcript")
+            detail = f"language={result.lang} confidence={result.confidence:.3f} text={result.text}"
+        print(f"PASS {args.provider}: {(time.perf_counter()-started)*1000:.1f} ms; {detail}")
+        return 0
     except Exception as exc:
-        passed &= _report("3-second microphone capture and resampling", started, exc)
-
-    output = AudioOutput(config)
-    started = time.perf_counter()
-    try:
-        if recorded is None or recorded.size == 0:
-            raise RuntimeError("no captured audio available")
-        output.start()
-        if not output.enqueue(recorded, int(config.section("input").get("target_sample_rate", 16000)), output.generation):
-            raise RuntimeError("playback queue rejected captured audio")
-        if not output.wait_empty(timeout=10):
-            raise TimeoutError("audio playback did not drain")
-        passed &= _report("recorded-audio playback", started)
-    except Exception as exc:
-        passed &= _report("recorded-audio playback", started, exc)
+        print(f"FAIL {args.provider}: {(time.perf_counter()-started)*1000:.1f} ms; {exc}")
+        return 1
     finally:
-        output.close()
-
-    stt = WhisperSTT(config)
-    started = time.perf_counter()
-    try:
-        if recorded is None or recorded.size == 0:
-            raise RuntimeError("no captured audio available")
-        transcript = stt.transcribe(recorded, sample_rate=int(config.section("input").get("target_sample_rate", 16000)))
-        if transcript is None:
-            raise RuntimeError("Whisper rejected the capture as silence or low confidence")
-        passed &= _report("Whisper transcription", started, detail=f"lang={transcript.lang}, confidence={transcript.confidence:.2f}")
-    except Exception as exc:
-        passed &= _report("Whisper transcription", started, exc)
-    finally:
-        stt.close()
-
-    tts = IndicParlerTTS(config)
-    output = AudioOutput(config)
-    output.start()
-    for language, phrase in (("en", "Hello. Voice check complete."), ("ur", "السلام علیکم۔ آواز کا ٹیسٹ مکمل ہوا۔")):
-        started = time.perf_counter()
-        try:
-            waveform = tts.synthesize(phrase, language)
-            output.enqueue(waveform, tts.sample_rate, output.generation)
-            if not output.wait_empty(timeout=45):
-                raise TimeoutError("TTS playback did not finish")
-            passed &= _report(f"Parler {language} synthesis and playback", started)
-        except Exception as exc:
-            passed &= _report(f"Parler {language} synthesis and playback", started, exc)
-    output.close()
-    tts.close()
-    print("SELFTEST " + ("PASS" if passed else "FAIL"), flush=True)
-    return 0 if passed else 1
+        if adapter is not None:
+            adapter.close()
 
 
 if __name__ == "__main__":

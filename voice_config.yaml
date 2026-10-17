@@ -1,14 +1,14 @@
 stt:
-  provider: groq
+  provider: faster-whisper
+  online_enabled: false
+  warmup_on_startup: false
   groq_model: whisper-large-v3-turbo
-  language: en
-  model: whisper-large-v3-turbo
-  fallback_model: base.en
+  language: auto
+  model: large-v3
+  model_path: null # Optional local CTranslate2 directory; otherwise use the existing HF cache only.
   vocabulary_hint: ""
-  device: groq
+  device: cpu
   compute_type: int8
-  fallback_device: cpu
-  fallback_compute_type: int8
   beam_size: 1
   vad_filter: true
   condition_on_previous_text: false
@@ -50,7 +50,14 @@ logging:
   backup_count: 4
 tts:
   enabled: true
-  provider: edge_tts
+  provider: piper
+  online_enabled: false # Edge requires provider: edge_tts AND explicit online opt-in.
+  warmup_on_startup: false
+  sample_rate: 22050
+  local:
+    models:
+      en: models/tts/en_US-amy-medium.onnx
+      ur: models/tts/ur_PK-aegis_female-medium.onnx
   voices:
     en: en-GB-RyanNeural
     ur: ur-PK-UzmaNeural
